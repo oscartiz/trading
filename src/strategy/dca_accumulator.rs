@@ -5,6 +5,7 @@
 //! Mechanism:
 //! - Dollar-Cost Average into BTC at regular intervals (cooldown-gated)
 //! - RSI filter: skip buys when overbought (RSI > 70), buy extra when oversold (< 30)
+//! - RSI profit exit: sell the profit portion when RSI > 80 (exceedingly overbought)
 //! - SMA trend filter: only buy when price is above 200-tick SMA (long-term uptrend)
 //! - Volatility scaling: reduce size in high-vol, halt in extreme-vol
 //! - Trailing stop-loss: protective sell if price drops 12% from peak
@@ -35,6 +36,8 @@ pub struct DcaConfig {
     pub rsi_overbought: Decimal,
     /// RSI threshold below which we increase buy size
     pub rsi_oversold: Decimal,
+    /// RSI threshold above which we sell the profit portion of the position
+    pub rsi_exit_threshold: Decimal,
     /// Multiplier applied to base notional when RSI is oversold
     pub oversold_multiplier: Decimal,
 }
@@ -47,6 +50,7 @@ impl Default for DcaConfig {
             vol_window: 20,
             rsi_overbought: dec!(70),
             rsi_oversold: dec!(30),
+            rsi_exit_threshold: dec!(80),
             oversold_multiplier: dec!(1.5),
         }
     }
@@ -70,6 +74,7 @@ pub async fn run_dca_strategy(
     let mut order_id: u64 = 0;
     let mut quote_balance = initial_balance;
     let mut crypto_qty = dec!(0);
+    let mut total_cost_basis = dec!(0); // cumulative USDT spent on buys (for avg entry)
     let mut tick_count: u64 = 0;
 
     // Subsample ticks — we don't need to evaluate on every aggTrade.
@@ -81,6 +86,7 @@ pub async fn run_dca_strategy(
         sma_period = dca_cfg.sma_period,
         max_alloc = %risk.params.max_allocation,
         trailing_stop = %risk.params.trailing_stop_pct,
+        rsi_exit = %dca_cfg.rsi_exit_threshold,
         "DCA Accumulator strategy started"
     );
 
@@ -147,6 +153,51 @@ pub async fn run_dca_strategy(
                 let current_rsi = indicators::rsi(prices, dca_cfg.rsi_period);
                 let sma_200 = indicators::sma(prices, dca_cfg.sma_period);
                 let vol = indicators::volatility_mad(prices, dca_cfg.vol_window);
+
+                // ── RSI Profit-Taking Exit ────────────────────────
+                // When RSI is exceedingly overbought, sell only the
+                // profit portion — keep the cost basis invested.
+                if let Some(rsi_val) = current_rsi {
+                    if rsi_val > dca_cfg.rsi_exit_threshold
+                        && crypto_qty > dec!(0)
+                        && total_cost_basis > dec!(0)
+                    {
+                        let avg_entry = total_cost_basis / crypto_qty;
+                        if price > avg_entry {
+                            // Profit portion: how many coins represent
+                            // the unrealized gain at current price
+                            // cost_basis_qty = total_cost_basis / price
+                            // profit_qty     = crypto_qty - cost_basis_qty
+                            let cost_basis_qty = total_cost_basis / price;
+                            let profit_qty = crypto_qty - cost_basis_qty;
+
+                            if profit_qty > dec!(0) {
+                                order_id += 1;
+                                let sell_order = OrderRequest {
+                                    id: order_id,
+                                    symbol: tick.symbol.clone(),
+                                    side: Side::Sell,
+                                    qty: profit_qty,
+                                    price,
+                                };
+                                info!(
+                                    id = order_id,
+                                    rsi = %rsi_val,
+                                    price = %price,
+                                    avg_entry = %avg_entry,
+                                    profit_qty = %profit_qty,
+                                    kept_qty = %cost_basis_qty,
+                                    "RSI EXIT — selling profit portion"
+                                );
+                                if let Err(e) = client.submit_order(sell_order).await {
+                                    warn!(error = %e, "Failed to submit RSI exit sell");
+                                }
+                                risk.record_trade(tick.timestamp);
+                                continue;
+                            }
+                        }
+                    }
+                }
 
                 // ── SMA Trend Filter ─────────────────────────────
                 // Only buy when price is above the long-term SMA
@@ -225,6 +276,7 @@ pub async fn run_dca_strategy(
                             Side::Buy => {
                                 quote_balance -= notional + report.fee;
                                 crypto_qty += report.filled_qty;
+                                total_cost_basis += notional + report.fee;
                                 info!(
                                     order_id = report.order_id,
                                     side = "BUY",
@@ -233,15 +285,22 @@ pub async fn run_dca_strategy(
                                     fee = %report.fee,
                                     quote_bal = %quote_balance,
                                     crypto_qty = %crypto_qty,
+                                    avg_entry = %(total_cost_basis / crypto_qty),
                                     "Fill confirmed"
                                 );
                             }
                             Side::Sell => {
                                 quote_balance += notional - report.fee;
                                 crypto_qty -= report.filled_qty;
+                                // Scale down cost basis proportionally
                                 if crypto_qty <= dec!(0) {
                                     crypto_qty = dec!(0);
+                                    total_cost_basis = dec!(0);
                                     risk.reset_trailing_stop();
+                                } else {
+                                    // Keep cost basis proportional to remaining position
+                                    let sold_fraction = report.filled_qty / (crypto_qty + report.filled_qty);
+                                    total_cost_basis -= total_cost_basis * sold_fraction;
                                 }
                                 info!(
                                     order_id = report.order_id,
@@ -251,6 +310,7 @@ pub async fn run_dca_strategy(
                                     fee = %report.fee,
                                     quote_bal = %quote_balance,
                                     crypto_qty = %crypto_qty,
+                                    cost_basis = %total_cost_basis,
                                     "Fill confirmed — position reduced"
                                 );
                             }
