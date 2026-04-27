@@ -1,0 +1,278 @@
+//! DCA Accumulator Strategy — a conservative, long-term, no-leverage strategy.
+//!
+//! Core philosophy: **Time in the market beats timing the market.**
+//!
+//! Mechanism:
+//! - Dollar-Cost Average into BTC at regular intervals (cooldown-gated)
+//! - RSI filter: skip buys when overbought (RSI > 70), buy extra when oversold (< 30)
+//! - SMA trend filter: only buy when price is above 200-tick SMA (long-term uptrend)
+//! - Volatility scaling: reduce size in high-vol, halt in extreme-vol
+//! - Trailing stop-loss: protective sell if price drops 12% from peak
+//! - Max 50% of portfolio in crypto at any time
+//! - No shorts, no leverage — ever
+
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+use crate::types::*;
+
+use super::indicators::{self, PriceBuffer};
+use super::risk::{RiskManager, RiskParams};
+use super::traits::ExecutionClient;
+
+/// Configuration specific to the DCA accumulator.
+#[derive(Debug, Clone)]
+pub struct DcaConfig {
+    /// RSI period (default: 14)
+    pub rsi_period: usize,
+    /// SMA trend filter period (default: 200)
+    pub sma_period: usize,
+    /// Volatility lookback window (default: 20)
+    pub vol_window: usize,
+    /// RSI threshold above which we skip buys
+    pub rsi_overbought: Decimal,
+    /// RSI threshold below which we increase buy size
+    pub rsi_oversold: Decimal,
+    /// Multiplier applied to base notional when RSI is oversold
+    pub oversold_multiplier: Decimal,
+}
+
+impl Default for DcaConfig {
+    fn default() -> Self {
+        Self {
+            rsi_period: 14,
+            sma_period: 200,
+            vol_window: 20,
+            rsi_overbought: dec!(70),
+            rsi_oversold: dec!(30),
+            oversold_multiplier: dec!(1.5),
+        }
+    }
+}
+
+/// Run the DCA accumulator strategy as a long-lived tokio task.
+pub async fn run_dca_strategy(
+    client: impl ExecutionClient,
+    mut tick_rx: mpsc::Receiver<MarketTick>,
+    mut report_rx: mpsc::Receiver<ExecutionReport>,
+    initial_balance: Decimal,
+) {
+    let dca_cfg = DcaConfig::default();
+    let risk_params = RiskParams::default();
+    let mut risk = RiskManager::new(risk_params, initial_balance);
+
+    // We need enough history for the longest indicator (SMA-200)
+    let buf_cap = dca_cfg.sma_period + 1;
+    let mut price_buf = PriceBuffer::new(buf_cap);
+
+    let mut order_id: u64 = 0;
+    let mut quote_balance = initial_balance;
+    let mut crypto_qty = dec!(0);
+    let mut tick_count: u64 = 0;
+
+    // Subsample ticks — we don't need to evaluate on every aggTrade.
+    // Process every Nth tick to build meaningful candle-like data points.
+    let tick_sample_rate: u64 = 100;
+
+    info!(
+        rsi_period = dca_cfg.rsi_period,
+        sma_period = dca_cfg.sma_period,
+        max_alloc = %risk.params.max_allocation,
+        trailing_stop = %risk.params.trailing_stop_pct,
+        "DCA Accumulator strategy started"
+    );
+
+    loop {
+        tokio::select! {
+            Some(tick) = tick_rx.recv() => {
+                tick_count += 1;
+
+                // Subsample: only process every Nth tick
+                if tick_count % tick_sample_rate != 0 {
+                    continue;
+                }
+
+                let price = tick.price;
+                price_buf.push(price);
+
+                // Update trailing stop tracker
+                if crypto_qty > dec!(0) {
+                    risk.update_price_peak(price);
+                }
+
+                // Update portfolio value for circuit breaker
+                let crypto_value = crypto_qty * price;
+                let portfolio_value = quote_balance + crypto_value;
+                risk.update_portfolio_value(portfolio_value);
+
+                // ── Trailing Stop Check ──────────────────────────
+                if crypto_qty > dec!(0) && risk.trailing_stop_triggered(price) {
+                    order_id += 1;
+                    let sell_order = OrderRequest {
+                        id: order_id,
+                        symbol: tick.symbol.clone(),
+                        side: Side::Sell,
+                        qty: crypto_qty,
+                        price,
+                    };
+                    warn!(
+                        id = order_id,
+                        price = %price,
+                        qty = %crypto_qty,
+                        "TRAILING STOP triggered — selling entire position"
+                    );
+                    if let Err(e) = client.submit_order(sell_order).await {
+                        warn!(error = %e, "Failed to submit stop-loss sell");
+                    }
+                    risk.record_trade(tick.timestamp);
+                    continue;
+                }
+
+                // ── Need minimum data for indicators ─────────────
+                if !price_buf.is_full() {
+                    if tick_count % (tick_sample_rate * 50) == 0 {
+                        info!(
+                            buffered = price_buf.len(),
+                            needed = buf_cap,
+                            "Warming up indicator buffer…"
+                        );
+                    }
+                    continue;
+                }
+
+                // ── Compute Indicators ───────────────────────────
+                let prices = price_buf.prices();
+                let current_rsi = indicators::rsi(prices, dca_cfg.rsi_period);
+                let sma_200 = indicators::sma(prices, dca_cfg.sma_period);
+                let vol = indicators::volatility_mad(prices, dca_cfg.vol_window);
+
+                // ── SMA Trend Filter ─────────────────────────────
+                // Only buy when price is above the long-term SMA
+                // (confirms we're in an uptrend)
+                if let Some(sma) = sma_200 {
+                    if price < sma {
+                        continue; // Below trend — sit on hands
+                    }
+                }
+
+                // ── RSI Filter ───────────────────────────────────
+                if let Some(rsi_val) = current_rsi {
+                    if rsi_val > dca_cfg.rsi_overbought {
+                        continue; // Overbought — skip this DCA window
+                    }
+                }
+
+                // ── Risk Manager Approval ────────────────────────
+                let approved = risk.approve_buy(
+                    tick.timestamp,
+                    quote_balance,
+                    crypto_value,
+                    vol,
+                );
+
+                let mut notional = match approved {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // ── RSI Oversold Bonus ───────────────────────────
+                if let Some(rsi_val) = current_rsi {
+                    if rsi_val < dca_cfg.rsi_oversold {
+                        notional = (notional * dca_cfg.oversold_multiplier)
+                            .min(risk.params.max_trade_notional)
+                            .min(quote_balance);
+                        info!(rsi = %rsi_val, boosted = %notional, "RSI oversold — boosting buy");
+                    }
+                }
+
+                // ── Submit Buy Order ─────────────────────────────
+                if price > dec!(0) {
+                    let qty = notional / price;
+                    if qty > dec!(0) {
+                        order_id += 1;
+                        let order = OrderRequest {
+                            id: order_id,
+                            symbol: tick.symbol.clone(),
+                            side: Side::Buy,
+                            qty,
+                            price,
+                        };
+                        info!(
+                            id = order_id,
+                            notional = %notional,
+                            qty = %qty,
+                            price = %price,
+                            rsi = ?current_rsi,
+                            vol = ?vol,
+                            alloc_pct = %(crypto_value / portfolio_value * dec!(100)),
+                            "DCA buy signal"
+                        );
+                        if let Err(e) = client.submit_order(order).await {
+                            warn!(error = %e, "Failed to submit DCA buy");
+                        }
+                        risk.record_trade(tick.timestamp);
+                    }
+                }
+            }
+
+            Some(report) = report_rx.recv() => {
+                match report.status {
+                    FillStatus::Filled => {
+                        let notional = report.fill_price * report.filled_qty;
+                        match report.side {
+                            Side::Buy => {
+                                quote_balance -= notional + report.fee;
+                                crypto_qty += report.filled_qty;
+                                info!(
+                                    order_id = report.order_id,
+                                    side = "BUY",
+                                    fill_price = %report.fill_price,
+                                    qty = %report.filled_qty,
+                                    fee = %report.fee,
+                                    quote_bal = %quote_balance,
+                                    crypto_qty = %crypto_qty,
+                                    "Fill confirmed"
+                                );
+                            }
+                            Side::Sell => {
+                                quote_balance += notional - report.fee;
+                                crypto_qty -= report.filled_qty;
+                                if crypto_qty <= dec!(0) {
+                                    crypto_qty = dec!(0);
+                                    risk.reset_trailing_stop();
+                                }
+                                info!(
+                                    order_id = report.order_id,
+                                    side = "SELL",
+                                    fill_price = %report.fill_price,
+                                    qty = %report.filled_qty,
+                                    fee = %report.fee,
+                                    quote_bal = %quote_balance,
+                                    crypto_qty = %crypto_qty,
+                                    "Fill confirmed — position reduced"
+                                );
+                            }
+                        }
+                    }
+                    FillStatus::Rejected => {
+                        warn!(order_id = report.order_id, "Order rejected by engine");
+                    }
+                    FillStatus::PartialFill => {
+                        info!(
+                            order_id = report.order_id,
+                            filled = %report.filled_qty,
+                            "Partial fill"
+                        );
+                    }
+                }
+            }
+
+            else => {
+                info!("All channels closed — DCA strategy shutting down.");
+                break;
+            }
+        }
+    }
+}

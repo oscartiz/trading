@@ -1,0 +1,44 @@
+[package]
+name = "crypto-paper-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Low-latency crypto paper trading bot targeting Binance"
+authors = ["tiz"]
+
+[dependencies]
+# ── Async Runtime ────────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# ── WebSocket / HTTP ─────────────────────────────────────────────────────────
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# ── Serialization ────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Deterministic Financial Math ─────────────────────────────────────────────
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+
+# ── Observability ────────────────────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# ── Error Handling ───────────────────────────────────────────────────────────
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+
+# ── ML Inference (future) ───────────────────────────────────────────────────
+# candle-core = "0.8"
+# candle-nn   = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
