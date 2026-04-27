@@ -49,13 +49,32 @@ The strategy buys small, fixed amounts of BTC at regular intervals — but only 
 
 3. **Risk Manager Approval** — Every order must pass through six independent guardrails before it can be submitted (see below).
 
-### The Only Sell: Trailing Stop-Loss
+### Sell Behavior
 
-The strategy never sells for profit-taking — it holds. The single exception is a **trailing stop-loss**: if the price drops 12% from its observed peak since the last buy, the entire position is liquidated to protect capital. The stop resets after a full exit.
+The strategy has exactly two sell triggers — one offensive, one defensive:
+
+| Trigger | Condition | What It Sells |
+|---------|-----------|---------------|
+| **RSI Profit Exit** | RSI > 80 | Only the *profit portion* — keeps cost basis invested |
+| **Trailing Stop-Loss** | Price drops 12% from peak | Entire position — full exit to protect capital |
+
+#### RSI Profit-Taking — How It Works
+
+The bot tracks your **average entry price** (cost basis) across all DCA buys. When RSI exceeds 80 (exceedingly overbought), it calculates how much of your position represents unrealized profit and sells only that:
+
+**Example:** You've DCA'd $500 total into 0.005 BTC (avg entry: $100k). Price runs to $120k and RSI hits 82:
+
+```
+Position value:     0.005 × $120k = $600
+Cost basis at $120k: $500 / $120k  = 0.00417 BTC  ← kept
+Profit portion:     0.005 - 0.00417 = 0.00083 BTC  ← sold
+```
+
+You bank ~$100 in profit and keep 0.00417 BTC — your original $500 of value stays invested. The cost basis accounting scales proportionally on partial sells, so repeated RSI exits remain accurate.
 
 ### What It Will NOT Do
 
-- **No short selling** — the only sell is the defensive trailing stop
+- **No short selling** — sells are only defensive (stop-loss) or profit-taking (RSI exit)
 - **No leverage** — order size is always capped to available cash
 - **No chasing** — SMA and RSI filters prevent buying at peaks
 - **No over-concentration** — hard 50% portfolio allocation ceiling
