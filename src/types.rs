@@ -108,3 +108,16 @@ pub struct PortfolioSnapshot {
     /// Latest trade event (if any)
     pub last_event: Option<String>,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Dashboard → Strategy (manual commands)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Manual commands sent from the dashboard UI to the strategy.
+#[derive(Debug, Clone)]
+pub enum DashboardCommand {
+    /// Manual market buy with a specific USDT notional amount
+    ManualBuy { notional: Decimal },
+    /// Panic sell — liquidate entire position immediately
+    PanicSell,
+}

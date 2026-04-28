@@ -250,13 +250,107 @@
 
   @media (max-width: 1024px) {
     .dashboard { grid-template-columns: repeat(2, 1fr); }
-    .chart-card.wide, .event-log { grid-column: span 2; }
+    .chart-card.wide, .event-log, .action-bar { grid-column: span 2; }
     .chart-card.extra-wide { grid-column: span 2; }
   }
 
   @media (max-width: 640px) {
     .dashboard { grid-template-columns: 1fr; padding: 1rem; }
-    .chart-card, .chart-card.wide, .chart-card.extra-wide, .event-log { grid-column: span 1; }
+    .chart-card, .chart-card.wide, .chart-card.extra-wide, .event-log, .action-bar { grid-column: span 1; }
+    .action-bar { flex-direction: column; }
+  }
+
+  /* Action Bar */
+  .action-bar {
+    grid-column: span 5;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.25rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .action-bar .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .notional-input {
+    width: 120px;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .notional-input:focus {
+    border-color: var(--accent-blue);
+  }
+
+  .btn {
+    padding: 0.55rem 1.25rem;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .btn-buy {
+    background: var(--accent-green);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+  }
+
+  .btn-buy:hover {
+    background: #059669;
+    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+    transform: translateY(-1px);
+  }
+
+  .btn-buy:active { transform: translateY(0); }
+
+  .btn-panic {
+    background: var(--accent-red);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    margin-left: auto;
+  }
+
+  .btn-panic:hover {
+    background: #dc2626;
+    box-shadow: 0 4px 16px rgba(239, 68, 68, 0.5);
+    transform: translateY(-1px);
+  }
+
+  .btn-panic:active { transform: translateY(0); }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none !important;
+  }
+
+  .btn-feedback {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-width: 80px;
   }
 </style>
 </head>
@@ -304,6 +398,17 @@
     <div class="card-label">RSI (14)</div>
     <div class="card-value" id="rsiValue">—</div>
     <div class="rsi-gauge"><div class="rsi-marker" id="rsiMarker"></div></div>
+  </div>
+
+  <!-- Action Bar -->
+  <div class="action-bar">
+    <span class="label">Manual Trade</span>
+    <span style="color: var(--text-muted); font-size: 0.8rem;">$</span>
+    <input type="number" class="notional-input" id="buyNotional" value="50" min="1" step="10" placeholder="USDT amount">
+    <button class="btn btn-buy" id="btnBuy" onclick="manualBuy()">Buy BTC</button>
+    <span class="btn-feedback" id="buyFeedback"></span>
+    <button class="btn btn-panic" id="btnPanic" onclick="panicSell()">🚨 Sell All</button>
+    <span class="btn-feedback" id="sellFeedback"></span>
   </div>
 
   <!-- Portfolio Chart -->
@@ -574,6 +679,80 @@ function updateDashboard(s) {
 }
 
 connect();
+
+// ── Manual Trade Actions ─────────────────────────────────────────
+async function manualBuy() {
+  const btn = document.getElementById('btnBuy');
+  const feedback = document.getElementById('buyFeedback');
+  const notional = parseFloat(document.getElementById('buyNotional').value);
+
+  if (isNaN(notional) || notional <= 0) {
+    feedback.textContent = 'Invalid amount';
+    feedback.style.color = 'var(--accent-red)';
+    return;
+  }
+
+  btn.disabled = true;
+  feedback.textContent = 'Submitting...';
+  feedback.style.color = 'var(--accent-amber)';
+
+  try {
+    const res = await fetch('/api/buy', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ notional }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      feedback.textContent = '✓ Submitted';
+      feedback.style.color = 'var(--accent-green)';
+    } else {
+      feedback.textContent = data.error || 'Error';
+      feedback.style.color = 'var(--accent-red)';
+    }
+  } catch (e) {
+    feedback.textContent = 'Failed';
+    feedback.style.color = 'var(--accent-red)';
+  }
+
+  btn.disabled = false;
+  setTimeout(() => { feedback.textContent = ''; }, 3000);
+}
+
+async function panicSell() {
+  const btn = document.getElementById('btnPanic');
+  const feedback = document.getElementById('sellFeedback');
+
+  if (!confirm('🚨 PANIC SELL: This will liquidate your ENTIRE position. Are you sure?')) {
+    return;
+  }
+
+  btn.disabled = true;
+  feedback.textContent = 'Selling...';
+  feedback.style.color = 'var(--accent-amber)';
+
+  try {
+    const res = await fetch('/api/sell-all', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    const data = await res.json();
+    if (res.ok) {
+      feedback.textContent = '✓ Liquidated';
+      feedback.style.color = 'var(--accent-red)';
+    } else {
+      feedback.textContent = data.error || 'Error';
+      feedback.style.color = 'var(--accent-red)';
+    }
+  } catch (e) {
+    feedback.textContent = 'Failed';
+    feedback.style.color = 'var(--accent-red)';
+  }
+
+  btn.disabled = false;
+  setTimeout(() => { feedback.textContent = ''; }, 3000);
+}
 </script>
 </body>
 </html>

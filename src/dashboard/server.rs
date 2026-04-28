@@ -1,17 +1,21 @@
-//! Axum-based dashboard server with WebSocket broadcast.
+//! Axum-based dashboard server with WebSocket broadcast and manual command API.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
     http::{header, StatusCode},
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{Html, IntoResponse, Json},
+    routing::{get, post},
     Router,
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::types::PortfolioSnapshot;
+use crate::types::{DashboardCommand, PortfolioSnapshot};
 
 const DASHBOARD_HTML: &str = include_str!("page.html");
 const LOGO_BYTES: &[u8] = include_bytes!("logo.jpg");
@@ -24,12 +28,29 @@ async fn serve_logo() -> impl IntoResponse {
     )
 }
 
+/// Shared state for the axum routes.
+#[derive(Clone)]
+struct AppState {
+    broadcast_tx: Arc<broadcast::Sender<String>>,
+    command_tx: mpsc::Sender<DashboardCommand>,
+}
+
+#[derive(Deserialize)]
+struct BuyRequest {
+    #[serde(default = "default_buy_notional")]
+    notional: f64,
+}
+
+fn default_buy_notional() -> f64 { 50.0 }
+
 /// Run the dashboard HTTP + WS server.
 ///
 /// Consumes snapshots from the strategy via MPSC, then broadcasts
-/// them to all connected WebSocket clients.
+/// them to all connected WebSocket clients. Also accepts manual
+/// commands via POST endpoints.
 pub async fn run_dashboard(
     mut snapshot_rx: mpsc::Receiver<PortfolioSnapshot>,
+    command_tx: mpsc::Sender<DashboardCommand>,
     port: u16,
 ) {
     // Broadcast channel: allows multiple WS clients to subscribe
@@ -46,21 +67,56 @@ pub async fn run_dashboard(
         }
     });
 
+    let state = AppState {
+        broadcast_tx: broadcast_tx.clone(),
+        command_tx,
+    };
+
     let app = Router::new()
         .route("/", get(|| async { Html(DASHBOARD_HTML) }))
         .route("/logo.jpg", get(serve_logo))
-        .route("/ws", get({
-            let tx = broadcast_tx.clone();
-            move |ws: WebSocketUpgrade| async move {
-                ws.on_upgrade(move |socket| handle_ws(socket, tx))
-            }
-        }));
+        .route("/ws", get(ws_handler))
+        .route("/api/buy", post(handle_buy))
+        .route("/api/sell-all", post(handle_sell_all))
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
     info!(url = format!("http://localhost:{port}"), "Dashboard server starting");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state.broadcast_tx))
+}
+
+async fn handle_buy(
+    State(state): State<AppState>,
+    Json(body): Json<BuyRequest>,
+) -> impl IntoResponse {
+    let notional = Decimal::try_from(body.notional).unwrap_or(dec!(50));
+    if notional <= dec!(0) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "notional must be > 0"})));
+    }
+    info!(notional = %notional, "Manual buy command received");
+    match state.command_tx.send(DashboardCommand::ManualBuy { notional }).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok", "action": "buy", "notional": body.notional}))),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "strategy channel closed"}))),
+    }
+}
+
+async fn handle_sell_all(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    info!("PANIC SELL command received");
+    match state.command_tx.send(DashboardCommand::PanicSell).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok", "action": "sell_all"}))),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "strategy channel closed"}))),
+    }
 }
 
 async fn handle_ws(mut socket: WebSocket, broadcast_tx: Arc<broadcast::Sender<String>>) {

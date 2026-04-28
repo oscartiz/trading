@@ -64,6 +64,7 @@ pub async fn run_dca_strategy(
     mut report_rx: mpsc::Receiver<ExecutionReport>,
     initial_balance: Decimal,
     snapshot_tx: Option<mpsc::Sender<PortfolioSnapshot>>,
+    mut command_rx: mpsc::Receiver<DashboardCommand>,
 ) {
     let dca_cfg = DcaConfig::default();
     let risk_params = RiskParams::default();
@@ -80,7 +81,8 @@ pub async fn run_dca_strategy(
     let mut tick_count: u64 = 0;
     let mut last_event: Option<String> = None;
     let mut last_rsi: Option<f64> = None;
-    let snapshot_interval: u64 = 10; // emit snapshot every Nth sampled tick
+    let mut last_price = dec!(0); // track for manual commands
+    let mut last_symbol = String::from("BTCUSDT");
 
     // Subsample ticks — we don't need to evaluate on every aggTrade.
     // Process every Nth tick to build meaningful candle-like data points.
@@ -106,6 +108,8 @@ pub async fn run_dca_strategy(
                 }
 
                 let price = tick.price;
+                last_price = price;
+                last_symbol = tick.symbol.clone();
                 price_buf.push(price);
 
                 // Update trailing stop tracker
@@ -120,7 +124,6 @@ pub async fn run_dca_strategy(
 
                 // ── Dashboard Snapshot ─────────────────────────────
                 if let Some(ref tx) = snapshot_tx {
-                    if tick_count % (tick_sample_rate * snapshot_interval) == 0 || last_event.is_some() {
                         let alloc_pct = if portfolio_value > dec!(0) {
                             crypto_value / portfolio_value * dec!(100)
                         } else { dec!(0) };
@@ -139,7 +142,6 @@ pub async fn run_dca_strategy(
                             rsi: last_rsi,
                             last_event: last_event.take(),
                         });
-                    }
                 }
 
                 // ── Trailing Stop Check ──────────────────────────
@@ -362,6 +364,73 @@ pub async fn run_dca_strategy(
                             filled = %report.filled_qty,
                             "Partial fill"
                         );
+                    }
+                }
+            }
+
+            Some(cmd) = command_rx.recv() => {
+                match cmd {
+                    DashboardCommand::ManualBuy { notional } => {
+                        if last_price <= dec!(0) {
+                            warn!("Manual buy ignored — no price data yet");
+                            continue;
+                        }
+                        if notional > quote_balance {
+                            warn!(notional = %notional, cash = %quote_balance, "Manual buy rejected — insufficient cash");
+                            last_event = Some(format!("REJECTED — insufficient cash (${} available)", quote_balance));
+                            continue;
+                        }
+                        let qty = notional / last_price;
+                        if qty > dec!(0) {
+                            order_id += 1;
+                            let order = OrderRequest {
+                                id: order_id,
+                                symbol: last_symbol.clone(),
+                                side: Side::Buy,
+                                qty,
+                                price: last_price,
+                            };
+                            info!(
+                                id = order_id,
+                                notional = %notional,
+                                qty = %qty,
+                                price = %last_price,
+                                "MANUAL BUY submitted"
+                            );
+                            if let Err(e) = client.submit_order(order).await {
+                                warn!(error = %e, "Failed to submit manual buy");
+                            }
+                            last_event = Some(format!("MANUAL BUY — {} BTC @ ${} (${} notional)", qty, last_price, notional));
+                        }
+                    }
+                    DashboardCommand::PanicSell => {
+                        if crypto_qty <= dec!(0) {
+                            warn!("Panic sell ignored — no position");
+                            last_event = Some("PANIC SELL — no position to sell".to_string());
+                            continue;
+                        }
+                        if last_price <= dec!(0) {
+                            warn!("Panic sell ignored — no price data yet");
+                            continue;
+                        }
+                        order_id += 1;
+                        let order = OrderRequest {
+                            id: order_id,
+                            symbol: last_symbol.clone(),
+                            side: Side::Sell,
+                            qty: crypto_qty,
+                            price: last_price,
+                        };
+                        warn!(
+                            id = order_id,
+                            qty = %crypto_qty,
+                            price = %last_price,
+                            "PANIC SELL — liquidating entire position"
+                        );
+                        if let Err(e) = client.submit_order(order).await {
+                            warn!(error = %e, "Failed to submit panic sell");
+                        }
+                        last_event = Some(format!("🚨 PANIC SELL — {} BTC @ ${}", crypto_qty, last_price));
                     }
                 }
             }

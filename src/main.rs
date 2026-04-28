@@ -78,10 +78,13 @@ async fn main() {
     // Strategy → Dashboard: portfolio snapshots
     let (snapshot_tx, snapshot_rx) = mpsc::channel::<types::PortfolioSnapshot>(256);
 
+    // Dashboard → Strategy: manual commands (buy, sell-all)
+    let (command_tx, command_rx) = mpsc::channel::<types::DashboardCommand>(16);
+
     // ── Spawn Pillar 4: Dashboard Server ────────────────────────────────
     let dashboard_port = 3030;
     let dashboard_handle = tokio::spawn(async move {
-        dashboard::server::run_dashboard(snapshot_rx, dashboard_port).await;
+        dashboard::server::run_dashboard(snapshot_rx, command_tx, dashboard_port).await;
     });
 
     // ── Spawn Pillar 1: Market Data Feed ────────────────────────────────
@@ -124,6 +127,7 @@ async fn main() {
             report_rx,
             initial_balance,
             Some(snapshot_tx),
+            command_rx,
         )
         .await;
     });
