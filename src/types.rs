@@ -105,8 +105,8 @@ pub struct PortfolioSnapshot {
     pub unrealized_pnl: Decimal,
     /// Current RSI (if available)
     pub rsi: Option<f64>,
-    /// Latest trade event (if any)
-    pub last_event: Option<String>,
+    /// Recent trade events history
+    pub event_history: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

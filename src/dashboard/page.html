@@ -664,17 +664,22 @@ function updateDashboard(s) {
   allocChart.update('none');
 
   // Event log
-  if (s.last_event) {
+  if (s.event_history && s.event_history.length > 0) {
     const list = document.getElementById('eventList');
-    if (list.children.length === 1 && list.children[0].textContent.includes('Waiting')) {
+    const existingCount = list.dataset.count || 0;
+    
+    // Only redraw if history length changed (basic check)
+    if (s.event_history.length != existingCount) {
       list.innerHTML = '';
+      s.event_history.forEach(event => {
+        const li = document.createElement('li');
+        const isBuy = event.toLowerCase().includes('buy');
+        const isSell = event.toLowerCase().includes('sell') || event.toLowerCase().includes('stop');
+        li.innerHTML = `<span class="event-time"></span><span class="${isBuy ? 'event-buy' : isSell ? 'event-sell' : 'event-info'}">${event}</span>`;
+        list.appendChild(li);
+      });
+      list.dataset.count = s.event_history.length;
     }
-    const li = document.createElement('li');
-    const isBuy = s.last_event.toLowerCase().includes('buy');
-    const isSell = s.last_event.toLowerCase().includes('sell') || s.last_event.toLowerCase().includes('stop');
-    li.innerHTML = `<span class="event-time">${timeLabel}</span><span class="${isBuy ? 'event-buy' : isSell ? 'event-sell' : 'event-info'}">${s.last_event}</span>`;
-    list.prepend(li);
-    if (list.children.length > 50) list.lastChild.remove();
   }
 }
 

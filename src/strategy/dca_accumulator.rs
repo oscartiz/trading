@@ -14,6 +14,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -77,12 +78,23 @@ pub async fn run_dca_strategy(
     let mut order_id: u64 = 0;
     let mut quote_balance = initial_balance;
     let mut crypto_qty = dec!(0);
-    let mut total_cost_basis = dec!(0); // cumulative USDT spent on buys (for avg entry)
+    let mut total_cost_basis = dec!(0);
     let mut tick_count: u64 = 0;
-    let mut last_event: Option<String> = None;
+    let mut event_history: VecDeque<String> = VecDeque::with_capacity(50);
     let mut last_rsi: Option<f64> = None;
     let mut last_price = dec!(0); // track for manual commands
     let mut last_symbol = String::from("BTCUSDT");
+
+    macro_rules! push_event {
+        ($msg:expr) => {
+            let msg = $msg;
+            info!("{}", msg);
+            event_history.push_front(msg);
+            if event_history.len() > 50 {
+                event_history.pop_back();
+            }
+        };
+    }
 
     // Subsample ticks — we don't need to evaluate on every aggTrade.
     // Process every Nth tick to build meaningful candle-like data points.
@@ -138,9 +150,9 @@ pub async fn run_dca_strategy(
                             portfolio_value,
                             allocation_pct: alloc_pct,
                             cost_basis: total_cost_basis,
-                            unrealized_pnl,
+                            unrealized_pnl: unrealized_pnl,
                             rsi: last_rsi,
-                            last_event: last_event.take(),
+                            event_history: event_history.iter().cloned().collect(),
                         });
                 }
 
@@ -164,7 +176,7 @@ pub async fn run_dca_strategy(
                         warn!(error = %e, "Failed to submit stop-loss sell");
                     }
                     risk.record_trade(tick.timestamp);
-                    last_event = Some(format!("TRAILING STOP — sold {} BTC @ ${}", crypto_qty, price));
+                    push_event!(format!("TRAILING STOP — sold {} BTC @ ${}", crypto_qty, price));
                     continue;
                 }
 
@@ -230,7 +242,7 @@ pub async fn run_dca_strategy(
                                     warn!(error = %e, "Failed to submit RSI exit sell");
                                 }
                                 risk.record_trade(tick.timestamp);
-                                last_event = Some(format!("RSI EXIT — sold {} BTC profit @ ${}", profit_qty, price));
+                                push_event!(format!("RSI EXIT — sold {} BTC profit @ ${}", profit_qty, price));
                                 continue;
                             }
                         }
@@ -302,7 +314,7 @@ pub async fn run_dca_strategy(
                             warn!(error = %e, "Failed to submit DCA buy");
                         }
                         risk.record_trade(tick.timestamp);
-                        last_event = Some(format!("DCA BUY — {} BTC @ ${} (${} notional)", qty, price, notional));
+                        push_event!(format!("DCA BUY — {} BTC @ ${} (${} notional)", qty, price, notional));
                     }
                 }
             }
@@ -376,8 +388,7 @@ pub async fn run_dca_strategy(
                             continue;
                         }
                         if notional > quote_balance {
-                            warn!(notional = %notional, cash = %quote_balance, "Manual buy rejected — insufficient cash");
-                            last_event = Some(format!("REJECTED — insufficient cash (${} available)", quote_balance));
+                            push_event!(format!("REJECTED — insufficient cash (${} available)", quote_balance));
                             continue;
                         }
                         let qty = notional / last_price;
@@ -400,13 +411,13 @@ pub async fn run_dca_strategy(
                             if let Err(e) = client.submit_order(order).await {
                                 warn!(error = %e, "Failed to submit manual buy");
                             }
-                            last_event = Some(format!("MANUAL BUY — {} BTC @ ${} (${} notional)", qty, last_price, notional));
+                            push_event!(format!("MANUAL BUY — {} BTC @ ${} (${} notional)", qty, last_price, notional));
                         }
                     }
                     DashboardCommand::PanicSell => {
                         if crypto_qty <= dec!(0) {
                             warn!("Panic sell ignored — no position");
-                            last_event = Some("PANIC SELL — no position to sell".to_string());
+                            push_event!("PANIC SELL — no position to sell".to_string());
                             continue;
                         }
                         if last_price <= dec!(0) {
@@ -421,16 +432,10 @@ pub async fn run_dca_strategy(
                             qty: crypto_qty,
                             price: last_price,
                         };
-                        warn!(
-                            id = order_id,
-                            qty = %crypto_qty,
-                            price = %last_price,
-                            "PANIC SELL — liquidating entire position"
-                        );
                         if let Err(e) = client.submit_order(order).await {
                             warn!(error = %e, "Failed to submit panic sell");
                         }
-                        last_event = Some(format!("🚨 PANIC SELL — {} BTC @ ${}", crypto_qty, last_price));
+                        push_event!(format!("🚨 PANIC SELL — {} BTC @ ${}", crypto_qty, last_price));
                     }
                 }
             }
