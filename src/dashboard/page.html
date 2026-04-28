@@ -100,12 +100,30 @@
   .dashboard {
     padding: 1.5rem 2rem;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     grid-template-rows: auto auto auto;
     gap: 1rem;
     max-width: 1600px;
     margin: 0 auto;
   }
+
+  .balance-breakdown {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted);
+  }
+
+  .balance-breakdown span {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .dot-cash { color: var(--accent-blue); }
+  .dot-crypto { color: var(--accent-green); }
 
   .card {
     background: var(--bg-card);
@@ -152,8 +170,13 @@
     min-height: 320px;
   }
 
+  .chart-card.extra-wide {
+    grid-column: span 3;
+    min-height: 380px;
+  }
+
   .chart-card.wide {
-    grid-column: span 4;
+    grid-column: span 5;
     min-height: 380px;
   }
 
@@ -175,7 +198,7 @@
   }
 
   .event-log {
-    grid-column: span 4;
+    grid-column: span 5;
     max-height: 200px;
     overflow-y: auto;
   }
@@ -227,12 +250,13 @@
 
   @media (max-width: 1024px) {
     .dashboard { grid-template-columns: repeat(2, 1fr); }
-    .chart-card.wide { grid-column: span 2; }
+    .chart-card.wide, .event-log { grid-column: span 2; }
+    .chart-card.extra-wide { grid-column: span 2; }
   }
 
   @media (max-width: 640px) {
     .dashboard { grid-template-columns: 1fr; padding: 1rem; }
-    .chart-card, .chart-card.wide, .event-log { grid-column: span 1; }
+    .chart-card, .chart-card.wide, .chart-card.extra-wide, .event-log { grid-column: span 1; }
   }
 </style>
 </head>
@@ -255,6 +279,15 @@
     <div class="card-label">Portfolio Value</div>
     <div class="card-value" id="portfolioValue">—</div>
     <div class="card-sub" id="pnlDisplay">—</div>
+    <div class="balance-breakdown">
+      <span><span class="dot-cash">●</span> Cash: <strong id="breakdownCash">—</strong></span>
+      <span><span class="dot-crypto">●</span> Crypto: <strong id="breakdownCrypto">—</strong></span>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Available Cash</div>
+    <div class="card-value" style="color: var(--accent-blue)" id="cashAvailable">—</div>
+    <div class="card-sub neutral" id="cashPct">—</div>
   </div>
   <div class="card">
     <div class="card-label">BTC Price</div>
@@ -264,6 +297,7 @@
   <div class="card">
     <div class="card-label">Position</div>
     <div class="card-value" id="position">—</div>
+    <div class="card-sub" id="positionValue">—</div>
     <div class="card-sub" id="allocation">—</div>
   </div>
   <div class="card">
@@ -294,7 +328,7 @@
   </div>
 
   <!-- RSI Chart -->
-  <div class="card chart-card">
+  <div class="card chart-card extra-wide">
     <div class="chart-header">
       <span class="chart-title">RSI History</span>
     </div>
@@ -476,7 +510,19 @@ function updateDashboard(s) {
   const now = new Date(s.timestamp);
   document.getElementById('priceTime').textContent = now.toLocaleTimeString();
 
+  // Available Cash card
+  document.getElementById('cashAvailable').textContent = '$' + quoteBal.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const cashPct = pv > 0 ? ((quoteBal / pv) * 100).toFixed(1) : '0.0';
+  document.getElementById('cashPct').textContent = cashPct + '% of portfolio';
+
+  // Portfolio breakdown
+  const cryptoVal = qty * price;
+  document.getElementById('breakdownCash').textContent = '$' + quoteBal.toLocaleString(undefined, {maximumFractionDigits: 0});
+  document.getElementById('breakdownCrypto').textContent = '$' + cryptoVal.toLocaleString(undefined, {maximumFractionDigits: 0});
+
+  // Position card
   document.getElementById('position').textContent = qty.toFixed(6) + ' BTC';
+  document.getElementById('positionValue').textContent = '≈ $' + cryptoVal.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const allocEl = document.getElementById('allocation');
   allocEl.textContent = allocPct.toFixed(1) + '% allocated';
 
