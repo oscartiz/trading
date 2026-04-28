@@ -72,3 +72,39 @@ pub struct ExecutionReport {
     pub fill_price: Decimal,
     pub fee: Decimal,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Strategy → Dashboard (portfolio snapshots)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A point-in-time snapshot of portfolio state, streamed to the dashboard.
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioSnapshot {
+    /// Timestamp in ms since epoch
+    pub timestamp: u64,
+    /// Current BTC price
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+    /// USDT cash balance
+    #[serde(with = "rust_decimal::serde::str")]
+    pub quote_balance: Decimal,
+    /// BTC quantity held
+    #[serde(with = "rust_decimal::serde::str")]
+    pub crypto_qty: Decimal,
+    /// Total portfolio value (quote + crypto * price)
+    #[serde(with = "rust_decimal::serde::str")]
+    pub portfolio_value: Decimal,
+    /// Crypto allocation as percentage
+    #[serde(with = "rust_decimal::serde::str")]
+    pub allocation_pct: Decimal,
+    /// Cumulative cost basis
+    #[serde(with = "rust_decimal::serde::str")]
+    pub cost_basis: Decimal,
+    /// Unrealized P&L
+    #[serde(with = "rust_decimal::serde::str")]
+    pub unrealized_pnl: Decimal,
+    /// Current RSI (if available)
+    pub rsi: Option<f64>,
+    /// Latest trade event (if any)
+    pub last_event: Option<String>,
+}

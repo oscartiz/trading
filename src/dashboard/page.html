@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Paper Trading — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2235;
+    --border: #1e293b;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-green: #10b981;
+    --accent-green-glow: rgba(16, 185, 129, 0.15);
+    --accent-red: #ef4444;
+    --accent-red-glow: rgba(239, 68, 68, 0.15);
+    --accent-blue: #3b82f6;
+    --accent-purple: #8b5cf6;
+    --accent-amber: #f59e0b;
+    --gradient-green: linear-gradient(135deg, #10b981, #059669);
+    --gradient-blue: linear-gradient(135deg, #3b82f6, #2563eb);
+    --gradient-purple: linear-gradient(135deg, #8b5cf6, #7c3aed);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+  }
+
+  .header {
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    backdrop-filter: blur(12px);
+    background: rgba(10, 14, 23, 0.85);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header h1 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent-green), var(--accent-blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-red);
+    transition: background 0.3s;
+  }
+
+  .status-dot.connected { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+
+  .dashboard {
+    padding: 1.5rem 2rem;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: auto auto auto;
+    gap: 1rem;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .card:hover {
+    border-color: rgba(59, 130, 246, 0.3);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  }
+
+  .card-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+  }
+
+  .card-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.2;
+  }
+
+  .card-sub {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .positive { color: var(--accent-green); }
+  .negative { color: var(--accent-red); }
+  .neutral { color: var(--text-secondary); }
+
+  .chart-card {
+    grid-column: span 2;
+    min-height: 320px;
+  }
+
+  .chart-card.wide {
+    grid-column: span 4;
+    min-height: 380px;
+  }
+
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .chart-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .chart-container {
+    position: relative;
+    height: calc(100% - 2.5rem);
+  }
+
+  .event-log {
+    grid-column: span 4;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .event-log .card-label { margin-bottom: 0.75rem; }
+
+  .event-list {
+    list-style: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+  }
+
+  .event-list li {
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    margin-bottom: 0.25rem;
+    display: flex;
+    gap: 1rem;
+    color: var(--text-secondary);
+  }
+
+  .event-list li:nth-child(odd) { background: rgba(255,255,255,0.02); }
+
+  .event-list .event-time { color: var(--text-muted); min-width: 80px; }
+  .event-list .event-buy { color: var(--accent-green); }
+  .event-list .event-sell { color: var(--accent-red); }
+  .event-list .event-info { color: var(--accent-blue); }
+
+  .rsi-gauge {
+    position: relative;
+    width: 100%;
+    height: 8px;
+    background: linear-gradient(90deg, var(--accent-green) 0%, var(--accent-amber) 50%, var(--accent-red) 100%);
+    border-radius: 4px;
+    margin-top: 0.75rem;
+    opacity: 0.7;
+  }
+
+  .rsi-marker {
+    position: absolute;
+    top: -4px;
+    width: 4px;
+    height: 16px;
+    background: white;
+    border-radius: 2px;
+    transition: left 0.5s ease;
+    box-shadow: 0 0 6px rgba(255,255,255,0.5);
+  }
+
+  @media (max-width: 1024px) {
+    .dashboard { grid-template-columns: repeat(2, 1fr); }
+    .chart-card.wide { grid-column: span 2; }
+  }
+
+  @media (max-width: 640px) {
+    .dashboard { grid-template-columns: 1fr; padding: 1rem; }
+    .chart-card, .chart-card.wide, .event-log { grid-column: span 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>⚡ Paper Trading Dashboard</h1>
+  <div class="status-badge">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting…</span>
+  </div>
+</div>
+
+<div class="dashboard">
+  <!-- KPI Cards -->
+  <div class="card">
+    <div class="card-label">Portfolio Value</div>
+    <div class="card-value" id="portfolioValue">—</div>
+    <div class="card-sub" id="pnlDisplay">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">BTC Price</div>
+    <div class="card-value" id="btcPrice">—</div>
+    <div class="card-sub neutral" id="priceTime">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Position</div>
+    <div class="card-value" id="position">—</div>
+    <div class="card-sub" id="allocation">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">RSI (14)</div>
+    <div class="card-value" id="rsiValue">—</div>
+    <div class="rsi-gauge"><div class="rsi-marker" id="rsiMarker"></div></div>
+  </div>
+
+  <!-- Portfolio Chart -->
+  <div class="card chart-card wide">
+    <div class="chart-header">
+      <span class="chart-title">Portfolio Value & BTC Price</span>
+      <span class="card-sub" id="dataPoints">0 points</span>
+    </div>
+    <div class="chart-container">
+      <canvas id="mainChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Allocation Chart -->
+  <div class="card chart-card">
+    <div class="chart-header">
+      <span class="chart-title">Allocation</span>
+    </div>
+    <div class="chart-container">
+      <canvas id="allocChart"></canvas>
+    </div>
+  </div>
+
+  <!-- RSI Chart -->
+  <div class="card chart-card">
+    <div class="chart-header">
+      <span class="chart-title">RSI History</span>
+    </div>
+    <div class="chart-container">
+      <canvas id="rsiChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Event Log -->
+  <div class="card event-log">
+    <div class="card-label">Trade Log</div>
+    <ul class="event-list" id="eventList">
+      <li><span class="event-info">Waiting for data…</span></li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const MAX_POINTS = 500;
+const data = { labels: [], portfolio: [], price: [], rsi: [] };
+let initialBalance = null;
+
+// ── Chart Setup ─────────────────────────────────────────────────────
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = '#1e293b';
+Chart.defaults.font.family = "'Inter', sans-serif";
+
+const mainChart = new Chart(document.getElementById('mainChart'), {
+  type: 'line',
+  data: {
+    labels: data.labels,
+    datasets: [
+      {
+        label: 'Portfolio ($)',
+        data: data.portfolio,
+        borderColor: '#10b981',
+        backgroundColor: 'rgba(16, 185, 129, 0.08)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2,
+        yAxisID: 'y',
+      },
+      {
+        label: 'BTC Price ($)',
+        data: data.price,
+        borderColor: '#3b82f6',
+        backgroundColor: 'transparent',
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 1.5,
+        borderDash: [4, 2],
+        yAxisID: 'y1',
+      }
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: { legend: { position: 'top', labels: { usePointStyle: true, pointStyle: 'line' } } },
+    scales: {
+      x: { display: true, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+      y: { position: 'left', ticks: { callback: v => '$' + v.toLocaleString() } },
+      y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { callback: v => '$' + v.toLocaleString() } },
+    },
+    animation: { duration: 300 },
+  },
+});
+
+const allocChart = new Chart(document.getElementById('allocChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Cash (USDT)', 'Crypto (BTC)'],
+    datasets: [{
+      data: [100, 0],
+      backgroundColor: ['#3b82f6', '#10b981'],
+      borderColor: '#111827',
+      borderWidth: 3,
+      hoverOffset: 8,
+    }],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    cutout: '65%',
+    plugins: {
+      legend: { position: 'bottom', labels: { padding: 16, usePointStyle: true, pointStyle: 'circle' } },
+    },
+    animation: { duration: 500 },
+  },
+});
+
+const rsiChart = new Chart(document.getElementById('rsiChart'), {
+  type: 'line',
+  data: {
+    labels: data.labels,
+    datasets: [{
+      label: 'RSI',
+      data: data.rsi,
+      borderColor: '#8b5cf6',
+      backgroundColor: 'rgba(139, 92, 246, 0.08)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0,
+      borderWidth: 2,
+    }],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      annotation: {},
+    },
+    scales: {
+      x: { display: true, ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+      y: {
+        min: 0, max: 100,
+        ticks: { stepSize: 10 },
+      },
+    },
+    animation: { duration: 300 },
+  },
+});
+
+// Draw overbought/oversold zones on RSI chart
+const rsiCtx = document.getElementById('rsiChart').getContext('2d');
+
+// ── WebSocket Connection ────────────────────────────────────────────
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('statusDot').classList.add('connected');
+    document.getElementById('statusText').textContent = 'Live';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('statusDot').classList.remove('connected');
+    document.getElementById('statusText').textContent = 'Reconnecting…';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (event) => {
+    try {
+      const s = JSON.parse(event.data);
+      updateDashboard(s);
+    } catch (e) {
+      console.error('Parse error:', e);
+    }
+  };
+}
+
+function updateDashboard(s) {
+  const pv = parseFloat(s.portfolio_value);
+  const price = parseFloat(s.price);
+  const qty = parseFloat(s.crypto_qty);
+  const quoteBal = parseFloat(s.quote_balance);
+  const allocPct = parseFloat(s.allocation_pct);
+  const costBasis = parseFloat(s.cost_basis);
+  const unrealizedPnl = parseFloat(s.unrealized_pnl);
+  const rsi = s.rsi;
+
+  if (initialBalance === null) initialBalance = pv;
+
+  // KPI Cards
+  document.getElementById('portfolioValue').textContent = '$' + pv.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+  const totalPnl = pv - initialBalance;
+  const pnlEl = document.getElementById('pnlDisplay');
+  const pnlPct = ((totalPnl / initialBalance) * 100).toFixed(2);
+  pnlEl.textContent = `${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)} (${pnlPct}%)`;
+  pnlEl.className = 'card-sub ' + (totalPnl >= 0 ? 'positive' : 'negative');
+
+  document.getElementById('btcPrice').textContent = '$' + price.toLocaleString(undefined, {maximumFractionDigits: 0});
+  const now = new Date(s.timestamp);
+  document.getElementById('priceTime').textContent = now.toLocaleTimeString();
+
+  document.getElementById('position').textContent = qty.toFixed(6) + ' BTC';
+  const allocEl = document.getElementById('allocation');
+  allocEl.textContent = allocPct.toFixed(1) + '% allocated';
+
+  if (rsi !== null && rsi !== undefined) {
+    document.getElementById('rsiValue').textContent = rsi.toFixed(1);
+    document.getElementById('rsiMarker').style.left = `calc(${rsi}% - 2px)`;
+
+    const rsiEl = document.getElementById('rsiValue');
+    if (rsi > 70) rsiEl.className = 'card-value negative';
+    else if (rsi < 30) rsiEl.className = 'card-value positive';
+    else rsiEl.className = 'card-value neutral';
+  }
+
+  // Time series
+  const timeLabel = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  data.labels.push(timeLabel);
+  data.portfolio.push(pv);
+  data.price.push(price);
+  data.rsi.push(rsi);
+
+  if (data.labels.length > MAX_POINTS) {
+    data.labels.shift();
+    data.portfolio.shift();
+    data.price.shift();
+    data.rsi.shift();
+  }
+
+  mainChart.update('none');
+  rsiChart.update('none');
+  document.getElementById('dataPoints').textContent = data.labels.length + ' points';
+
+  // Allocation donut
+  allocChart.data.datasets[0].data = [100 - allocPct, allocPct];
+  allocChart.update('none');
+
+  // Event log
+  if (s.last_event) {
+    const list = document.getElementById('eventList');
+    if (list.children.length === 1 && list.children[0].textContent.includes('Waiting')) {
+      list.innerHTML = '';
+    }
+    const li = document.createElement('li');
+    const isBuy = s.last_event.toLowerCase().includes('buy');
+    const isSell = s.last_event.toLowerCase().includes('sell') || s.last_event.toLowerCase().includes('stop');
+    li.innerHTML = `<span class="event-time">${timeLabel}</span><span class="${isBuy ? 'event-buy' : isSell ? 'event-sell' : 'event-info'}">${s.last_event}</span>`;
+    list.prepend(li);
+    if (list.children.length > 50) list.lastChild.remove();
+  }
+}
+
+connect();
+</script>
+</body>
+</html>

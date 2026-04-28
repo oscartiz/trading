@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::types::*;
+use rust_decimal::prelude::ToPrimitive;
 
 use super::indicators::{self, PriceBuffer};
 use super::risk::{RiskManager, RiskParams};
@@ -62,6 +63,7 @@ pub async fn run_dca_strategy(
     mut tick_rx: mpsc::Receiver<MarketTick>,
     mut report_rx: mpsc::Receiver<ExecutionReport>,
     initial_balance: Decimal,
+    snapshot_tx: Option<mpsc::Sender<PortfolioSnapshot>>,
 ) {
     let dca_cfg = DcaConfig::default();
     let risk_params = RiskParams::default();
@@ -76,6 +78,9 @@ pub async fn run_dca_strategy(
     let mut crypto_qty = dec!(0);
     let mut total_cost_basis = dec!(0); // cumulative USDT spent on buys (for avg entry)
     let mut tick_count: u64 = 0;
+    let mut last_event: Option<String> = None;
+    let mut last_rsi: Option<f64> = None;
+    let snapshot_interval: u64 = 10; // emit snapshot every Nth sampled tick
 
     // Subsample ticks — we don't need to evaluate on every aggTrade.
     // Process every Nth tick to build meaningful candle-like data points.
@@ -113,6 +118,30 @@ pub async fn run_dca_strategy(
                 let portfolio_value = quote_balance + crypto_value;
                 risk.update_portfolio_value(portfolio_value);
 
+                // ── Dashboard Snapshot ─────────────────────────────
+                if let Some(ref tx) = snapshot_tx {
+                    if tick_count % (tick_sample_rate * snapshot_interval) == 0 || last_event.is_some() {
+                        let alloc_pct = if portfolio_value > dec!(0) {
+                            crypto_value / portfolio_value * dec!(100)
+                        } else { dec!(0) };
+                        let unrealized_pnl = if crypto_qty > dec!(0) {
+                            crypto_value - total_cost_basis
+                        } else { dec!(0) };
+                        let _ = tx.try_send(PortfolioSnapshot {
+                            timestamp: tick.timestamp,
+                            price,
+                            quote_balance,
+                            crypto_qty,
+                            portfolio_value,
+                            allocation_pct: alloc_pct,
+                            cost_basis: total_cost_basis,
+                            unrealized_pnl,
+                            rsi: last_rsi,
+                            last_event: last_event.take(),
+                        });
+                    }
+                }
+
                 // ── Trailing Stop Check ──────────────────────────
                 if crypto_qty > dec!(0) && risk.trailing_stop_triggered(price) {
                     order_id += 1;
@@ -133,6 +162,7 @@ pub async fn run_dca_strategy(
                         warn!(error = %e, "Failed to submit stop-loss sell");
                     }
                     risk.record_trade(tick.timestamp);
+                    last_event = Some(format!("TRAILING STOP — sold {} BTC @ ${}", crypto_qty, price));
                     continue;
                 }
 
@@ -153,6 +183,11 @@ pub async fn run_dca_strategy(
                 let current_rsi = indicators::rsi(prices, dca_cfg.rsi_period);
                 let sma_200 = indicators::sma(prices, dca_cfg.sma_period);
                 let vol = indicators::volatility_mad(prices, dca_cfg.vol_window);
+
+                // Track RSI for dashboard
+                if let Some(r) = current_rsi {
+                    last_rsi = r.to_f64();
+                }
 
                 // ── RSI Profit-Taking Exit ────────────────────────
                 // When RSI is exceedingly overbought, sell only the
@@ -193,6 +228,7 @@ pub async fn run_dca_strategy(
                                     warn!(error = %e, "Failed to submit RSI exit sell");
                                 }
                                 risk.record_trade(tick.timestamp);
+                                last_event = Some(format!("RSI EXIT — sold {} BTC profit @ ${}", profit_qty, price));
                                 continue;
                             }
                         }
@@ -264,6 +300,7 @@ pub async fn run_dca_strategy(
                             warn!(error = %e, "Failed to submit DCA buy");
                         }
                         risk.record_trade(tick.timestamp);
+                        last_event = Some(format!("DCA BUY — {} BTC @ ${} (${} notional)", qty, price, notional));
                     }
                 }
             }

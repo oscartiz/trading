@@ -23,6 +23,7 @@
 //! ```
 
 mod config;
+mod dashboard;
 mod engine;
 mod error;
 mod feed;
@@ -74,6 +75,15 @@ async fn main() {
     // Engine → Strategy: execution reports
     let (report_tx, report_rx) = mpsc::channel::<types::ExecutionReport>(config.channel_buffer);
 
+    // Strategy → Dashboard: portfolio snapshots
+    let (snapshot_tx, snapshot_rx) = mpsc::channel::<types::PortfolioSnapshot>(256);
+
+    // ── Spawn Pillar 4: Dashboard Server ────────────────────────────────
+    let dashboard_port = 3030;
+    let dashboard_handle = tokio::spawn(async move {
+        dashboard::server::run_dashboard(snapshot_rx, dashboard_port).await;
+    });
+
     // ── Spawn Pillar 1: Market Data Feed ────────────────────────────────
     let feed_config = config.clone();
     let feed_handle = tokio::spawn(async move {
@@ -113,9 +123,15 @@ async fn main() {
             tick_rx_strategy,
             report_rx,
             initial_balance,
+            Some(snapshot_tx),
         )
         .await;
     });
+
+    info!(
+        dashboard = format!("http://localhost:{dashboard_port}"),
+        "All pillars running — open the dashboard in your browser"
+    );
 
     // ── Await Completion ────────────────────────────────────────────────
     // In production, you'd add signal handling (SIGINT/SIGTERM) for graceful
@@ -124,6 +140,7 @@ async fn main() {
         _ = feed_handle => info!("Feed task exited."),
         _ = engine_handle => info!("Engine task exited."),
         _ = strategy_handle => info!("Strategy task exited."),
+        _ = dashboard_handle => info!("Dashboard task exited."),
     }
 
     info!("Bot shutdown complete.");
