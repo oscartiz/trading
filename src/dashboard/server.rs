@@ -2,7 +2,8 @@
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::Html,
+    http::{header, StatusCode},
+    response::{Html, IntoResponse},
     routing::get,
     Router,
 };
@@ -13,6 +14,15 @@ use tracing::{info, warn};
 use crate::types::PortfolioSnapshot;
 
 const DASHBOARD_HTML: &str = include_str!("page.html");
+const LOGO_BYTES: &[u8] = include_bytes!("logo.jpg");
+
+async fn serve_logo() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/jpeg")],
+        LOGO_BYTES,
+    )
+}
 
 /// Run the dashboard HTTP + WS server.
 ///
@@ -38,6 +48,7 @@ pub async fn run_dashboard(
 
     let app = Router::new()
         .route("/", get(|| async { Html(DASHBOARD_HTML) }))
+        .route("/logo.jpg", get(serve_logo))
         .route("/ws", get({
             let tx = broadcast_tx.clone();
             move |ws: WebSocketUpgrade| async move {
