@@ -12,6 +12,7 @@
 //! - Max 50% of portfolio in crypto at any time
 //! - No shorts, no leverage — ever
 
+use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::VecDeque;
@@ -87,11 +88,39 @@ pub async fn run_dca_strategy(
 
     macro_rules! push_event {
         ($msg:expr) => {
-            let msg = $msg;
+            let msg = format!("[{}] {}", Utc::now().format("%H:%M:%S"), $msg);
             info!("{}", msg);
             event_history.push_front(msg);
             if event_history.len() > 50 {
                 event_history.pop_back();
+            }
+            emit_snapshot!(Utc::now().timestamp_millis() as u64);
+        };
+    }
+
+    macro_rules! emit_snapshot {
+        ($timestamp:expr) => {
+            if let Some(ref tx) = snapshot_tx {
+                let crypto_value = crypto_qty * last_price;
+                let portfolio_value = quote_balance + crypto_value;
+                let alloc_pct = if portfolio_value > dec!(0) {
+                    crypto_value / portfolio_value * dec!(100)
+                } else { dec!(0) };
+                let unrealized_pnl = if crypto_qty > dec!(0) {
+                    crypto_value - total_cost_basis
+                } else { dec!(0) };
+                let _ = tx.try_send(PortfolioSnapshot {
+                    timestamp: $timestamp,
+                    price: last_price,
+                    quote_balance,
+                    crypto_qty,
+                    portfolio_value,
+                    allocation_pct: alloc_pct,
+                    cost_basis: total_cost_basis,
+                    unrealized_pnl,
+                    rsi: last_rsi,
+                    event_history: event_history.iter().cloned().collect(),
+                });
             }
         };
     }
@@ -113,15 +142,18 @@ pub async fn run_dca_strategy(
         tokio::select! {
             Some(tick) = tick_rx.recv() => {
                 tick_count += 1;
+                last_price = tick.price;
+                last_symbol = tick.symbol.clone();
 
                 // Subsample: only process every Nth tick
                 if tick_count % tick_sample_rate != 0 {
+                    if tick_count % (tick_sample_rate / 2).max(1) == 0 {
+                        emit_snapshot!(tick.timestamp);
+                    }
                     continue;
                 }
 
                 let price = tick.price;
-                last_price = price;
-                last_symbol = tick.symbol.clone();
                 price_buf.push(price);
 
                 // Update trailing stop tracker
@@ -135,26 +167,7 @@ pub async fn run_dca_strategy(
                 risk.update_portfolio_value(portfolio_value);
 
                 // ── Dashboard Snapshot ─────────────────────────────
-                if let Some(ref tx) = snapshot_tx {
-                        let alloc_pct = if portfolio_value > dec!(0) {
-                            crypto_value / portfolio_value * dec!(100)
-                        } else { dec!(0) };
-                        let unrealized_pnl = if crypto_qty > dec!(0) {
-                            crypto_value - total_cost_basis
-                        } else { dec!(0) };
-                        let _ = tx.try_send(PortfolioSnapshot {
-                            timestamp: tick.timestamp,
-                            price,
-                            quote_balance,
-                            crypto_qty,
-                            portfolio_value,
-                            allocation_pct: alloc_pct,
-                            cost_basis: total_cost_basis,
-                            unrealized_pnl: unrealized_pnl,
-                            rsi: last_rsi,
-                            event_history: event_history.iter().cloned().collect(),
-                        });
-                }
+                emit_snapshot!(tick.timestamp);
 
                 // ── Trailing Stop Check ──────────────────────────
                 if crypto_qty > dec!(0) && risk.trailing_stop_triggered(price) {
