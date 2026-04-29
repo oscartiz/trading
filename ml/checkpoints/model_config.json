@@ -1,0 +1,15 @@
+{
+    "num_levels": 10,
+    "features_per_level": 4,
+    "lookback": 100,
+    "num_classes": 3,
+    "conv_channels": [
+        1,
+        32,
+        32,
+        32
+    ],
+    "inception_channels": 64,
+    "lstm_hidden": 64,
+    "lstm_layers": 1
+}

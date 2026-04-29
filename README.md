@@ -35,6 +35,22 @@ The system is built on three decoupled pillars communicating exclusively through
 
 ---
 
+## Quick Start
+
+To run the bot and monitor the live dashboard simultaneously:
+
+1. **Start the Bot**: Run the following command in your terminal:
+   ```bash
+   cargo run --release
+   ```
+2. **Open the Dashboard**: Once the bot is running, open your browser and go to:
+   [http://localhost:3030](http://localhost:3030)
+
+> [!TIP]
+> Keep the terminal window and browser side-by-side. The terminal will show the raw execution logs and strategy decisions, while the dashboard provides a high-level visual overview of your portfolio and RSI trends.
+
+---
+
 ## Strategy: DCA Accumulator
 
 The bot implements a conservative **Dollar-Cost Averaging** strategy designed for long-term holding with minimal risk. The core philosophy is simple: *time in the market beats timing the market.*
@@ -194,9 +210,32 @@ ws_url: "wss://stream.binance.us:9443/ws".into(),
 
 ---
 
+---
+
+## Machine Learning Pipeline (DeepLOB)
+
+The project includes a state-of-the-art Python machine learning pipeline (`ml/`) designed to train a Deep Limit Order Book (DeepLOB) model. This model predicts high-frequency mid-price movements (Up, Down, Stationary) directly from raw level-2 market data.
+
+### Architecture Features
+- **CNN + Inception + LSTM**: Uses 1D/2D convolutions to extract spatial patterns from the order book, an Inception module for multi-scale feature extraction, and an LSTM to model temporal sequence dependencies.
+- **Smoothed Forward-Rolling Window Labeling**: Avoids micro-structure noise by comparing current prices to a rolling average of future horizons, classifying moves based on a dynamically adaptable volatility threshold.
+- **Relative Spread Normalization**: Normalizes prices relative to the mid-price to preserve spread dynamics, and scales volumes as a fraction of total visible depth.
+- **Rust-Ready Export**: The pipeline automatically exports trained weights to a `deeplob.safetensors` file along with a `model_config.json`, making it trivial to load into the Rust `candle-core` inference engine.
+
+To run the training pipeline (using synthetic data for demonstration):
+```bash
+cd ml
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python train.py
+```
+
+---
+
 ## Future Roadmap
 
-- **ML Inference** — Replace RSI/SMA filters with `candle-core` forward passes on price-action features. The `ExecutionClient` trait boundary ensures the strategy interface stays identical.
+- **ML Inference** — The `ml/` directory contains a PyTorch implementation of the DeepLOB (Deep Convolutional Neural Networks for Limit Order Books) architecture. This pipeline trains on high-frequency snapshot data and exports its weights to `.safetensors`. The upcoming goal is to replace the RSI/SMA filters with `candle-core` forward passes on this model.
 - **Live Trading** — Implement `ExecutionClient` against the Binance REST API. The strategy code changes zero lines.
 - **Multi-Symbol** — DCA into a basket (BTC + ETH) with per-asset allocation limits.
 - **Persistence** — Log fills to SQLite for post-session P&L analysis and backtesting.

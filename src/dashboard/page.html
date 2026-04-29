@@ -728,35 +728,27 @@ async function panicSell() {
   const btn = document.getElementById('btnPanic');
   const feedback = document.getElementById('sellFeedback');
 
-  if (!confirm('🚨 PANIC SELL: This will liquidate your ENTIRE position. Are you sure?')) {
-    return;
-  }
-
   btn.disabled = true;
   feedback.textContent = 'Selling...';
   feedback.style.color = 'var(--accent-amber)';
 
   try {
-    const res = await fetch('/api/sell-all', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: '{}',
-    });
+    const res = await fetch('/api/sell-all', { method: 'POST' });
     const data = await res.json();
     if (res.ok) {
       feedback.textContent = '✓ Liquidated';
       feedback.style.color = 'var(--accent-red)';
+      setTimeout(() => { feedback.textContent = ''; btn.disabled = false; }, 3000);
     } else {
       feedback.textContent = data.error || 'Error';
       feedback.style.color = 'var(--accent-red)';
+      btn.disabled = false;
     }
   } catch (e) {
     feedback.textContent = 'Failed';
     feedback.style.color = 'var(--accent-red)';
+    btn.disabled = false;
   }
-
-  btn.disabled = false;
-  setTimeout(() => { feedback.textContent = ''; }, 3000);
 }
 </script>
 </body>
