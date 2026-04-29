@@ -19,6 +19,16 @@ class ZScorePreprocessor:
         # Avoid division by zero
         self.std[self.std == 0] = 1e-8
         
+    def save(self, filepath: str):
+        if self.mean is None or self.std is None:
+            raise ValueError("Cannot save unfitted preprocessor.")
+        np.savez(filepath, mean=self.mean, std=self.std)
+        
+    def load(self, filepath: str):
+        data = np.load(filepath)
+        self.mean = data['mean']
+        self.std = data['std']
+        
     def transform(self, snapshots: np.ndarray) -> torch.Tensor:
         """Apply Z-score normalization and convert to windowed Time-Series Tensors."""
         if self.mean is None or self.std is None:

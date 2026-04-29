@@ -55,6 +55,9 @@ def prepare_data():
     X_val = preprocessor.transform(val_snaps)
     X_test = preprocessor.transform(test_snaps)
     
+    params_path = os.path.join(PATHS.models_dir, "zscore_params.npz")
+    preprocessor.save(params_path)
+    
     # Align labels with the windowed tensors
     y_train = align_labels(train_labels, MODEL_CONFIG.lookback)
     y_val = align_labels(val_labels, MODEL_CONFIG.lookback)

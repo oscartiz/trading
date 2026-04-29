@@ -50,6 +50,8 @@ The `ml/` directory contains the quantitative research stack used to discover al
    - **Realistic Friction**: Simulates an exact 50ms exchange queuing latency and strictly enforces Taker fees/Slippage.
    - **Visualization**: Outputs `matplotlib` charts detailing portfolio erosion/growth against exact execution markers on the tick timeline.
 
+   ![Maker Backtest Results](ml/backtest_results.png)
+
 ---
 
 ## ⚡ 2. Execution Engine (`/src`)
