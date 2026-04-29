@@ -39,8 +39,9 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 
 # ── ML Inference (future) ───────────────────────────────────────────────────
-# candle-core = "0.8"
-# candle-nn   = "0.8"
+candle-core = "0.8"
+candle-nn   = "0.8"
+safetensors = "0.7.0"
 
 [profile.release]
 opt-level = 3

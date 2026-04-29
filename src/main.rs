@@ -65,9 +65,9 @@ async fn main() {
     // This avoids a single consumer bottleneck and lets each pillar process
     // ticks at its own cadence.
     let (tick_tx_strategy, tick_rx_strategy) =
-        mpsc::channel(config.channel_buffer);
+        mpsc::channel::<types::MarketEvent>(config.channel_buffer);
     let (tick_tx_engine, tick_rx_engine) =
-        mpsc::channel(config.channel_buffer);
+        mpsc::channel::<types::MarketEvent>(config.channel_buffer);
 
     // Strategy → Engine: order requests
     let (order_tx, order_rx) = mpsc::channel::<types::OrderRequest>(config.channel_buffer);
@@ -92,7 +92,7 @@ async fn main() {
     let feed_handle = tokio::spawn(async move {
         // Fan-out: clone each tick to both the strategy and engine channels.
         let (internal_tx, mut internal_rx) =
-            mpsc::channel::<types::MarketTick>(feed_config.channel_buffer);
+            mpsc::channel::<types::MarketEvent>(feed_config.channel_buffer);
 
         let tx_s = tick_tx_strategy;
         let tx_e = tick_tx_engine;

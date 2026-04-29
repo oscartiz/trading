@@ -14,18 +14,32 @@ use serde::{Deserialize, Serialize};
 /// Deserialized from the `@aggTrade` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketTick {
-    /// Trading pair, e.g. "BTCUSDT"
     pub symbol: String,
-    /// Aggregate trade price — always base-10 via rust_decimal
     #[serde(with = "rust_decimal::serde::str")]
     pub price: Decimal,
-    /// Aggregate trade quantity
     #[serde(with = "rust_decimal::serde::str")]
     pub qty: Decimal,
-    /// Event timestamp (ms since epoch)
     pub timestamp: u64,
-    /// Was the buyer the maker?
     pub is_buyer_maker: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DepthLevel {
+    pub price: Decimal,
+    pub qty: Decimal,
+}
+
+#[derive(Debug, Clone)]
+pub struct DepthSnapshot {
+    pub timestamp: u64,
+    pub bids: Vec<DepthLevel>,
+    pub asks: Vec<DepthLevel>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MarketEvent {
+    Tick(MarketTick),
+    Depth(DepthSnapshot),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -105,6 +119,8 @@ pub struct PortfolioSnapshot {
     pub unrealized_pnl: Decimal,
     /// Current RSI (if available)
     pub rsi: Option<f64>,
+    /// ML Prediction
+    pub ml_prediction: Option<String>,
     /// Recent trade events history
     pub event_history: Vec<String>,
 }

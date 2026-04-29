@@ -18,7 +18,7 @@ pub async fn run_engine(
     config: Config,
     mut order_rx: mpsc::Receiver<OrderRequest>,
     report_tx: mpsc::Sender<ExecutionReport>,
-    mut tick_rx: mpsc::Receiver<MarketTick>,
+    mut event_rx: mpsc::Receiver<MarketEvent>,
 ) {
     let mut account = VirtualAccount::new(config.initial_balance);
     let mut last_price: Option<Decimal> = None;
@@ -28,8 +28,10 @@ pub async fn run_engine(
     loop {
         tokio::select! {
             // Continuously update the latest market price
-            Some(tick) = tick_rx.recv() => {
-                last_price = Some(tick.price);
+            Some(event) = event_rx.recv() => {
+                if let MarketEvent::Tick(tick) = event {
+                    last_price = Some(tick.price);
+                }
             }
 
             // Process incoming order requests

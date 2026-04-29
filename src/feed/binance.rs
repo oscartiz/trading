@@ -1,21 +1,27 @@
-//! Binance aggregate trade WebSocket feed.
+//! Binance multiplexed WebSocket feed.
 //!
-//! Connects to `wss://stream.binance.com:9443/ws/<symbol>@aggTrade`,
-//! deserializes each frame, and pushes [`MarketTick`] into the provided
+//! Connects to combined streams for `aggTrade` and `depth20@100ms`,
+//! deserializes each frame, and pushes [`MarketEvent`] into the provided
 //! MPSC sender. Implements automatic reconnection with exponential backoff.
 
 use futures_util::StreamExt;
+
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::types::MarketTick;
+use crate::types::{DepthLevel, DepthSnapshot, MarketEvent, MarketTick};
+
+/// Container for multiplexed streams
+#[derive(Debug, Deserialize)]
+struct MultiplexedMessage {
+    pub stream: String,
+    pub data: serde_json::Value,
+}
 
 /// Raw JSON shape from the Binance `@aggTrade` stream.
-/// We deserialize into this private struct and then map to our canonical
-/// [`MarketTick`], keeping the Binance wire format isolated.
 #[derive(Debug, Deserialize)]
 struct RawAggTrade {
     #[serde(rename = "s")]
@@ -28,6 +34,15 @@ struct RawAggTrade {
     timestamp: u64,
     #[serde(rename = "m")]
     is_buyer_maker: bool,
+}
+
+/// Raw JSON shape from the Binance `@depth20` stream.
+#[derive(Debug, Deserialize)]
+struct RawDepth {
+    #[serde(default)]
+    lastUpdateId: u64,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
 }
 
 impl TryFrom<RawAggTrade> for MarketTick {
@@ -44,12 +59,38 @@ impl TryFrom<RawAggTrade> for MarketTick {
     }
 }
 
-/// Spawn the WebSocket listener as a long-lived tokio task.
-///
-/// This task owns the read-half of the WS connection. It never touches
-/// strategy logic or account state — it only serializes data and pushes
-/// it through the channel, enforcing the "feed never blocks strategy" rule.
-pub async fn run_feed(config: Config, tick_tx: mpsc::Sender<MarketTick>) {
+impl TryFrom<RawDepth> for DepthSnapshot {
+    type Error = rust_decimal::Error;
+
+    fn try_from(raw: RawDepth) -> std::result::Result<Self, Self::Error> {
+        let mut bids = Vec::with_capacity(raw.bids.len());
+        for b in raw.bids {
+            bids.push(DepthLevel {
+                price: b[0].parse()?,
+                qty: b[1].parse()?,
+            });
+        }
+        
+        let mut asks = Vec::with_capacity(raw.asks.len());
+        for a in raw.asks {
+            asks.push(DepthLevel {
+                price: a[0].parse()?,
+                qty: a[1].parse()?,
+            });
+        }
+        
+        // Approximate timestamp using system time since depth20 doesn't provide it
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+        Ok(DepthSnapshot {
+            timestamp,
+            bids,
+            asks,
+        })
+    }
+}
+
+pub async fn run_feed(config: Config, event_tx: mpsc::Sender<MarketEvent>) {
     let url = config.stream_url();
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF: u64 = 60;
@@ -68,24 +109,33 @@ pub async fn run_feed(config: Config, tick_tx: mpsc::Sender<MarketTick>) {
                     match msg_result {
                         Ok(msg) => {
                             if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                                match serde_json::from_str::<RawAggTrade>(&text) {
-                                    Ok(raw) => match MarketTick::try_from(raw) {
-                                        Ok(tick) => {
-                                            if tick_tx.send(tick).await.is_err() {
-                                                error!("Tick channel closed — shutting down feed.");
-                                                return;
+                                match serde_json::from_str::<MultiplexedMessage>(&text) {
+                                    Ok(multi) => {
+                                        if multi.stream.ends_with("@aggTrade") {
+                                            if let Ok(raw) = serde_json::from_value::<RawAggTrade>(multi.data) {
+                                                if let Ok(tick) = MarketTick::try_from(raw) {
+                                                    if event_tx.send(MarketEvent::Tick(tick)).await.is_err() {
+                                                        error!("Event channel closed — shutting down feed.");
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        } else if multi.stream.ends_with("@depth20@100ms") {
+                                            if let Ok(raw) = serde_json::from_value::<RawDepth>(multi.data) {
+                                                if let Ok(depth) = DepthSnapshot::try_from(raw) {
+                                                    if event_tx.send(MarketEvent::Depth(depth)).await.is_err() {
+                                                        error!("Event channel closed — shutting down feed.");
+                                                        return;
+                                                    }
+                                                }
                                             }
                                         }
-                                        Err(e) => {
-                                            warn!(error = %e, "Decimal parse error, skipping frame");
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!(error = %e, "JSON deserialization failed, skipping frame");
+                                    }
+                                    Err(_) => {
+                                        // Ignore parsing error for top-level object
                                     }
                                 }
                             }
-                            // Silently ignore Ping/Pong/Binary frames
                         }
                         Err(e) => {
                             error!(error = %e, "WebSocket read error — will reconnect.");

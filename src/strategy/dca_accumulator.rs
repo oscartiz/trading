@@ -25,6 +25,9 @@ use rust_decimal::prelude::ToPrimitive;
 use super::indicators::{self, PriceBuffer};
 use super::risk::{RiskManager, RiskParams};
 use super::traits::ExecutionClient;
+use super::ml::DeepLOB;
+use candle_core::{Device, Tensor};
+use candle_nn::VarBuilder;
 
 /// Configuration specific to the DCA accumulator.
 #[derive(Debug, Clone)]
@@ -62,7 +65,7 @@ impl Default for DcaConfig {
 /// Run the DCA accumulator strategy as a long-lived tokio task.
 pub async fn run_dca_strategy(
     client: impl ExecutionClient,
-    mut tick_rx: mpsc::Receiver<MarketTick>,
+    mut event_rx: mpsc::Receiver<MarketEvent>,
     mut report_rx: mpsc::Receiver<ExecutionReport>,
     initial_balance: Decimal,
     snapshot_tx: Option<mpsc::Sender<PortfolioSnapshot>>,
@@ -83,6 +86,8 @@ pub async fn run_dca_strategy(
     let mut tick_count: u64 = 0;
     let mut event_history: VecDeque<String> = VecDeque::with_capacity(50);
     let mut last_rsi: Option<f64> = None;
+    let mut ml_prediction: Option<String> = None;
+    let mut depth_buffer: VecDeque<DepthSnapshot> = VecDeque::with_capacity(100);
     let mut last_price = dec!(0); // track for manual commands
     let mut last_symbol = String::from("BTCUSDT");
 
@@ -119,6 +124,7 @@ pub async fn run_dca_strategy(
                     cost_basis: total_cost_basis,
                     unrealized_pnl,
                     rsi: last_rsi,
+                    ml_prediction: ml_prediction.clone(),
                     event_history: event_history.iter().cloned().collect(),
                 });
             }
@@ -138,199 +144,287 @@ pub async fn run_dca_strategy(
         "DCA Accumulator strategy started"
     );
 
+    // Load ML model
+    let device = Device::Cpu;
+    let ml_model: Option<DeepLOB> = match unsafe { VarBuilder::from_mmaped_safetensors(&["ml/checkpoints/deeplob.safetensors"], candle_core::DType::F32, &device) } {
+        Ok(vb) => match DeepLOB::load(vb) {
+            Ok(m) => {
+                info!("DeepLOB model successfully loaded for inference.");
+                Some(m)
+            }
+            Err(e) => {
+                warn!("Failed to build DeepLOB architecture: {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            warn!("Failed to load safetensors: {}", e);
+            None
+        }
+    };
+
     loop {
         tokio::select! {
-            Some(tick) = tick_rx.recv() => {
-                tick_count += 1;
-                last_price = tick.price;
-                last_symbol = tick.symbol.clone();
+            Some(event) = event_rx.recv() => {
+                match event {
+                    MarketEvent::Tick(tick) => {
+                        tick_count += 1;
+                        last_price = tick.price;
+                        last_symbol = tick.symbol.clone();
 
-                // Subsample: only process every Nth tick
-                if tick_count % tick_sample_rate != 0 {
-                    if tick_count % (tick_sample_rate / 2).max(1) == 0 {
+                        // Subsample: only process every Nth tick
+                        if tick_count % tick_sample_rate != 0 {
+                            if tick_count % (tick_sample_rate / 2).max(1) == 0 {
+                                emit_snapshot!(tick.timestamp);
+                            }
+                            continue;
+                        }
+
+                        let price = tick.price;
+                        price_buf.push(price);
+
+                        // Update trailing stop tracker
+                        if crypto_qty > dec!(0) {
+                            risk.update_price_peak(price);
+                        }
+
+                        // Update portfolio value for circuit breaker
+                        let crypto_value = crypto_qty * price;
+                        let portfolio_value = quote_balance + crypto_value;
+                        risk.update_portfolio_value(portfolio_value);
+
+                        // ── Dashboard Snapshot ─────────────────────────────
                         emit_snapshot!(tick.timestamp);
-                    }
-                    continue;
-                }
 
-                let price = tick.price;
-                price_buf.push(price);
+                        // ── Trailing Stop Check ──────────────────────────
+                        if crypto_qty > dec!(0) && risk.trailing_stop_triggered(price) {
+                            order_id += 1;
+                            let sell_order = OrderRequest {
+                                id: order_id,
+                                symbol: tick.symbol.clone(),
+                                side: Side::Sell,
+                                qty: crypto_qty,
+                                price,
+                            };
+                            warn!(
+                                id = order_id,
+                                price = %price,
+                                qty = %crypto_qty,
+                                "TRAILING STOP triggered — selling entire position"
+                            );
+                            if let Err(e) = client.submit_order(sell_order).await {
+                                warn!(error = %e, "Failed to submit stop-loss sell");
+                            }
+                            risk.record_trade(tick.timestamp);
+                            push_event!(format!("TRAILING STOP — sold {} BTC @ ${}", crypto_qty, price));
+                            continue;
+                        }
 
-                // Update trailing stop tracker
-                if crypto_qty > dec!(0) {
-                    risk.update_price_peak(price);
-                }
+                        // ── Need minimum data for indicators ─────────────
+                        if !price_buf.is_full() {
+                            if tick_count % (tick_sample_rate * 50) == 0 {
+                                info!(
+                                    buffered = price_buf.len(),
+                                    needed = buf_cap,
+                                    "Warming up indicator buffer…"
+                                );
+                            }
+                            continue;
+                        }
 
-                // Update portfolio value for circuit breaker
-                let crypto_value = crypto_qty * price;
-                let portfolio_value = quote_balance + crypto_value;
-                risk.update_portfolio_value(portfolio_value);
+                        // ── Compute Indicators ───────────────────────────
+                        let prices = price_buf.prices();
+                        let current_rsi = indicators::rsi(prices, dca_cfg.rsi_period);
+                        let sma_200 = indicators::sma(prices, dca_cfg.sma_period);
+                        let vol = indicators::volatility_mad(prices, dca_cfg.vol_window);
 
-                // ── Dashboard Snapshot ─────────────────────────────
-                emit_snapshot!(tick.timestamp);
+                        // Track RSI for dashboard
+                        if let Some(r) = current_rsi {
+                            last_rsi = r.to_f64();
+                        }
 
-                // ── Trailing Stop Check ──────────────────────────
-                if crypto_qty > dec!(0) && risk.trailing_stop_triggered(price) {
-                    order_id += 1;
-                    let sell_order = OrderRequest {
-                        id: order_id,
-                        symbol: tick.symbol.clone(),
-                        side: Side::Sell,
-                        qty: crypto_qty,
-                        price,
-                    };
-                    warn!(
-                        id = order_id,
-                        price = %price,
-                        qty = %crypto_qty,
-                        "TRAILING STOP triggered — selling entire position"
-                    );
-                    if let Err(e) = client.submit_order(sell_order).await {
-                        warn!(error = %e, "Failed to submit stop-loss sell");
-                    }
-                    risk.record_trade(tick.timestamp);
-                    push_event!(format!("TRAILING STOP — sold {} BTC @ ${}", crypto_qty, price));
-                    continue;
-                }
+                        // ── RSI Profit-Taking Exit ────────────────────────
+                        // When RSI is exceedingly overbought, sell only the
+                        // profit portion — keep the cost basis invested.
+                        if let Some(rsi_val) = current_rsi {
+                            if rsi_val > dca_cfg.rsi_exit_threshold
+                                && crypto_qty > dec!(0)
+                                && total_cost_basis > dec!(0)
+                            {
+                                let avg_entry = total_cost_basis / crypto_qty;
+                                if price > avg_entry {
+                                    // Profit portion: how many coins represent
+                                    // the unrealized gain at current price
+                                    // cost_basis_qty = total_cost_basis / price
+                                    // profit_qty     = crypto_qty - cost_basis_qty
+                                    let cost_basis_qty = total_cost_basis / price;
+                                    let profit_qty = crypto_qty - cost_basis_qty;
 
-                // ── Need minimum data for indicators ─────────────
-                if !price_buf.is_full() {
-                    if tick_count % (tick_sample_rate * 50) == 0 {
-                        info!(
-                            buffered = price_buf.len(),
-                            needed = buf_cap,
-                            "Warming up indicator buffer…"
+                                    if profit_qty > dec!(0) {
+                                        order_id += 1;
+                                        let sell_order = OrderRequest {
+                                            id: order_id,
+                                            symbol: tick.symbol.clone(),
+                                            side: Side::Sell,
+                                            qty: profit_qty,
+                                            price,
+                                        };
+                                        info!(
+                                            id = order_id,
+                                            rsi = %rsi_val,
+                                            price = %price,
+                                            avg_entry = %avg_entry,
+                                            profit_qty = %profit_qty,
+                                            kept_qty = %cost_basis_qty,
+                                            "RSI EXIT — selling profit portion"
+                                        );
+                                        if let Err(e) = client.submit_order(sell_order).await {
+                                            warn!(error = %e, "Failed to submit RSI exit sell");
+                                        }
+                                        risk.record_trade(tick.timestamp);
+                                        push_event!(format!("RSI EXIT — sold {} BTC profit @ ${}", profit_qty, price));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── SMA Trend Filter ─────────────────────────────
+                        // Only buy when price is above the long-term SMA
+                        // (confirms we're in an uptrend)
+                        if let Some(sma) = sma_200 {
+                            if price < sma {
+                                continue; // Below trend — sit on hands
+                            }
+                        }
+
+                        // ── RSI Filter ───────────────────────────────────
+                        if let Some(rsi_val) = current_rsi {
+                            if rsi_val > dca_cfg.rsi_overbought {
+                                continue; // Overbought — skip this DCA window
+                            }
+                        }
+
+                        // ── Risk Manager Approval ────────────────────────
+                        let approved = risk.approve_buy(
+                            tick.timestamp,
+                            quote_balance,
+                            crypto_value,
+                            vol,
                         );
-                    }
-                    continue;
-                }
 
-                // ── Compute Indicators ───────────────────────────
-                let prices = price_buf.prices();
-                let current_rsi = indicators::rsi(prices, dca_cfg.rsi_period);
-                let sma_200 = indicators::sma(prices, dca_cfg.sma_period);
-                let vol = indicators::volatility_mad(prices, dca_cfg.vol_window);
+                        let mut notional = match approved {
+                            Some(n) => n,
+                            None => continue,
+                        };
 
-                // Track RSI for dashboard
-                if let Some(r) = current_rsi {
-                    last_rsi = r.to_f64();
-                }
+                        // ── RSI Oversold Bonus ───────────────────────────
+                        if let Some(rsi_val) = current_rsi {
+                            if rsi_val < dca_cfg.rsi_oversold {
+                                notional = (notional * dca_cfg.oversold_multiplier)
+                                    .min(risk.params.max_trade_notional)
+                                    .min(quote_balance);
+                                info!(rsi = %rsi_val, boosted = %notional, "RSI oversold — boosting buy");
+                            }
+                        }
 
-                // ── RSI Profit-Taking Exit ────────────────────────
-                // When RSI is exceedingly overbought, sell only the
-                // profit portion — keep the cost basis invested.
-                if let Some(rsi_val) = current_rsi {
-                    if rsi_val > dca_cfg.rsi_exit_threshold
-                        && crypto_qty > dec!(0)
-                        && total_cost_basis > dec!(0)
-                    {
-                        let avg_entry = total_cost_basis / crypto_qty;
-                        if price > avg_entry {
-                            // Profit portion: how many coins represent
-                            // the unrealized gain at current price
-                            // cost_basis_qty = total_cost_basis / price
-                            // profit_qty     = crypto_qty - cost_basis_qty
-                            let cost_basis_qty = total_cost_basis / price;
-                            let profit_qty = crypto_qty - cost_basis_qty;
-
-                            if profit_qty > dec!(0) {
+                        // ── Submit Buy Order ─────────────────────────────
+                        if price > dec!(0) {
+                            let qty = notional / price;
+                            if qty > dec!(0) {
                                 order_id += 1;
-                                let sell_order = OrderRequest {
+                                let order = OrderRequest {
                                     id: order_id,
                                     symbol: tick.symbol.clone(),
-                                    side: Side::Sell,
-                                    qty: profit_qty,
+                                    side: Side::Buy,
+                                    qty,
                                     price,
                                 };
                                 info!(
                                     id = order_id,
-                                    rsi = %rsi_val,
+                                    notional = %notional,
+                                    qty = %qty,
                                     price = %price,
-                                    avg_entry = %avg_entry,
-                                    profit_qty = %profit_qty,
-                                    kept_qty = %cost_basis_qty,
-                                    "RSI EXIT — selling profit portion"
+                                    rsi = ?current_rsi,
+                                    vol = ?vol,
+                                    alloc_pct = %(crypto_value / portfolio_value * dec!(100)),
+                                    "DCA buy signal"
                                 );
-                                if let Err(e) = client.submit_order(sell_order).await {
-                                    warn!(error = %e, "Failed to submit RSI exit sell");
+                                if let Err(e) = client.submit_order(order).await {
+                                    warn!(error = %e, "Failed to submit DCA buy");
                                 }
                                 risk.record_trade(tick.timestamp);
-                                push_event!(format!("RSI EXIT — sold {} BTC profit @ ${}", profit_qty, price));
-                                continue;
+                                push_event!(format!("DCA BUY — {} BTC @ ${} (${} notional)", qty, price, notional));
+                            }
+                        }
+                    }
+                    MarketEvent::Depth(depth) => {
+                        depth_buffer.push_back(depth);
+                        if depth_buffer.len() > 100 {
+                            depth_buffer.pop_front();
+                        }
+
+                        // Run ML inference
+                        if depth_buffer.len() == 100 {
+                            if let Some(ref model) = ml_model {
+                                // Build tensor (1, 1, 100, 40)
+                                let mut features: Vec<f32> = Vec::with_capacity(100 * 40);
+                                for d in depth_buffer.iter() {
+                                    // Ensure we have at least 10 levels
+                                    if d.bids.len() < 10 || d.asks.len() < 10 {
+                                        // Pad with zeros if necessary (unlikely on binance depth20)
+                                        features.resize(features.len() + 40, 0.0);
+                                        continue;
+                                    }
+                                    
+                                    let best_bid = d.bids[0].price.to_f64().unwrap_or(1.0);
+                                    let best_ask = d.asks[0].price.to_f64().unwrap_or(1.0);
+                                    let mid_price = (best_bid + best_ask) / 2.0;
+                                    
+                                    for i in 0..10 {
+                                        let ask_p = d.asks[i].price.to_f64().unwrap_or(0.0);
+                                        let ask_v = d.asks[i].qty.to_f64().unwrap_or(0.0);
+                                        let bid_p = d.bids[i].price.to_f64().unwrap_or(0.0);
+                                        let bid_v = d.bids[i].qty.to_f64().unwrap_or(0.0);
+                                        
+                                        // Normalization
+                                        features.push(((ask_p - mid_price) / mid_price) as f32);
+                                        features.push((ask_v / 100_000.0) as f32);
+                                        features.push(((bid_p - mid_price) / mid_price) as f32);
+                                        features.push((bid_v / 100_000.0) as f32);
+                                    }
+                                }
+                                
+                                if features.len() == 4000 {
+                                    if let Ok(tensor) = Tensor::from_vec(features, (1, 1, 100, 40), &device) {
+                                        if let Ok(logits) = model.forward(&tensor) {
+                                            if let Ok(logits_vec) = logits.squeeze(0).and_then(|t| t.to_vec1::<f32>()) {
+                                                let logits_vec: Vec<f32> = logits_vec;
+                                                if logits_vec.len() == 3 {
+                                                    // Softmax is not strictly needed just for argmax, but we find the max index
+                                                    let mut max_idx = 0;
+                                                    let mut max_val = logits_vec[0];
+                                                    if logits_vec[1] > max_val { max_idx = 1; max_val = logits_vec[1]; }
+                                                    if logits_vec[2] > max_val { max_idx = 2; }
+                                                    
+                                                    // Map idx back to string
+                                                    ml_prediction = match max_idx {
+                                                        0 => Some("Up".to_string()),
+                                                        1 => Some("Down".to_string()),
+                                                        _ => Some("Stationary".to_string()),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-
-                // ── SMA Trend Filter ─────────────────────────────
-                // Only buy when price is above the long-term SMA
-                // (confirms we're in an uptrend)
-                if let Some(sma) = sma_200 {
-                    if price < sma {
-                        continue; // Below trend — sit on hands
-                    }
-                }
-
-                // ── RSI Filter ───────────────────────────────────
-                if let Some(rsi_val) = current_rsi {
-                    if rsi_val > dca_cfg.rsi_overbought {
-                        continue; // Overbought — skip this DCA window
-                    }
-                }
-
-                // ── Risk Manager Approval ────────────────────────
-                let approved = risk.approve_buy(
-                    tick.timestamp,
-                    quote_balance,
-                    crypto_value,
-                    vol,
-                );
-
-                let mut notional = match approved {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                // ── RSI Oversold Bonus ───────────────────────────
-                if let Some(rsi_val) = current_rsi {
-                    if rsi_val < dca_cfg.rsi_oversold {
-                        notional = (notional * dca_cfg.oversold_multiplier)
-                            .min(risk.params.max_trade_notional)
-                            .min(quote_balance);
-                        info!(rsi = %rsi_val, boosted = %notional, "RSI oversold — boosting buy");
-                    }
-                }
-
-                // ── Submit Buy Order ─────────────────────────────
-                if price > dec!(0) {
-                    let qty = notional / price;
-                    if qty > dec!(0) {
-                        order_id += 1;
-                        let order = OrderRequest {
-                            id: order_id,
-                            symbol: tick.symbol.clone(),
-                            side: Side::Buy,
-                            qty,
-                            price,
-                        };
-                        info!(
-                            id = order_id,
-                            notional = %notional,
-                            qty = %qty,
-                            price = %price,
-                            rsi = ?current_rsi,
-                            vol = ?vol,
-                            alloc_pct = %(crypto_value / portfolio_value * dec!(100)),
-                            "DCA buy signal"
-                        );
-                        if let Err(e) = client.submit_order(order).await {
-                            warn!(error = %e, "Failed to submit DCA buy");
-                        }
-                        risk.record_trade(tick.timestamp);
-                        push_event!(format!("DCA BUY — {} BTC @ ${} (${} notional)", qty, price, notional));
-                    }
-                }
             }
+
+
 
             Some(report) = report_rx.recv() => {
                 match report.status {

@@ -212,7 +212,7 @@ ws_url: "wss://stream.binance.us:9443/ws".into(),
 
 ---
 
-## Machine Learning Pipeline (DeepLOB)
+## Machine Learning Pipeline (DeepLOB) & Inference
 
 The project includes a state-of-the-art Python machine learning pipeline (`ml/`) designed to train a Deep Limit Order Book (DeepLOB) model. This model predicts high-frequency mid-price movements (Up, Down, Stationary) directly from raw level-2 market data.
 
@@ -220,7 +220,8 @@ The project includes a state-of-the-art Python machine learning pipeline (`ml/`)
 - **CNN + Inception + LSTM**: Uses 1D/2D convolutions to extract spatial patterns from the order book, an Inception module for multi-scale feature extraction, and an LSTM to model temporal sequence dependencies.
 - **Smoothed Forward-Rolling Window Labeling**: Avoids micro-structure noise by comparing current prices to a rolling average of future horizons, classifying moves based on a dynamically adaptable volatility threshold.
 - **Relative Spread Normalization**: Normalizes prices relative to the mid-price to preserve spread dynamics, and scales volumes as a fraction of total visible depth.
-- **Rust-Ready Export**: The pipeline automatically exports trained weights to a `deeplob.safetensors` file along with a `model_config.json`, making it trivial to load into the Rust `candle-core` inference engine.
+- **Rust Inference Engine**: The model architecture is fully recreated in Rust using `candle-core` and `candle-nn`. At runtime, the bot dynamically loads the trained `deeplob.safetensors` model weights and performs zero-overhead, real-time predictions inside the core event loop on a sliding buffer of order book snapshots.
+- **Dashboard Visualization**: The live dashboard features a DeepLOB card that dynamically visualizes the high-frequency ML inference output. 
 
 To run the training pipeline (using synthetic data for demonstration):
 ```bash
@@ -235,7 +236,6 @@ python train.py
 
 ## Future Roadmap
 
-- **ML Inference** — The `ml/` directory contains a PyTorch implementation of the DeepLOB (Deep Convolutional Neural Networks for Limit Order Books) architecture. This pipeline trains on high-frequency snapshot data and exports its weights to `.safetensors`. The upcoming goal is to replace the RSI/SMA filters with `candle-core` forward passes on this model.
 - **Live Trading** — Implement `ExecutionClient` against the Binance REST API. The strategy code changes zero lines.
 - **Multi-Symbol** — DCA into a basket (BTC + ETH) with per-asset allocation limits.
 - **Persistence** — Log fills to SQLite for post-session P&L analysis and backtesting.

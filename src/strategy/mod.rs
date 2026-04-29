@@ -12,3 +12,4 @@ pub mod dca_accumulator;
 pub mod indicators;
 pub mod risk;
 pub mod traits;
+pub mod ml;

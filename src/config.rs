@@ -37,6 +37,6 @@ impl Default for Config {
 impl Config {
     /// Full WebSocket URL for the configured symbol's aggregate trade stream.
     pub fn stream_url(&self) -> String {
-        format!("{}/{}@aggTrade", self.ws_url, self.symbol)
+        format!("{}/stream?streams={}@aggTrade/{}@depth20@100ms", self.ws_url.replace("/ws", ""), self.symbol, self.symbol)
     }
 }

@@ -100,7 +100,7 @@
   .dashboard {
     padding: 1.5rem 2rem;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     grid-template-rows: auto auto auto;
     gap: 1rem;
     max-width: 1600px;
@@ -176,7 +176,7 @@
   }
 
   .chart-card.wide {
-    grid-column: span 5;
+    grid-column: span 6;
     min-height: 380px;
   }
 
@@ -198,7 +198,7 @@
   }
 
   .event-log {
-    grid-column: span 5;
+    grid-column: span 6;
     max-height: 200px;
     overflow-y: auto;
   }
@@ -262,7 +262,7 @@
 
   /* Action Bar */
   .action-bar {
-    grid-column: span 5;
+    grid-column: span 6;
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -399,6 +399,11 @@
     <div class="card-value" id="rsiValue">—</div>
     <div class="rsi-gauge"><div class="rsi-marker" id="rsiMarker"></div></div>
   </div>
+  <div class="card">
+    <div class="card-label">DeepLOB Pred</div>
+    <div class="card-value" id="mlPrediction">—</div>
+    <div class="card-sub neutral">Next 100 Ticks</div>
+  </div>
 
   <!-- Action Bar -->
   <div class="action-bar">
@@ -453,8 +458,9 @@
 
 <script>
 const MAX_POINTS = 500;
-const data = { labels: [], portfolio: [], price: [], rsi: [] };
+const data = { labels: [], portfolio: [], price: [], rsi: [], buys: [], sells: [] };
 let initialBalance = null;
+let lastSeenEvent = "";
 
 // ── Chart Setup ─────────────────────────────────────────────────────
 Chart.defaults.color = '#94a3b8';
@@ -486,6 +492,27 @@ const mainChart = new Chart(document.getElementById('mainChart'), {
         pointRadius: 0,
         borderWidth: 1.5,
         borderDash: [4, 2],
+        yAxisID: 'y1',
+      },
+      {
+        label: 'Buy',
+        data: data.buys,
+        borderColor: '#10b981',
+        backgroundColor: '#10b981',
+        pointStyle: 'triangle',
+        pointRadius: 6,
+        showLine: false,
+        yAxisID: 'y1',
+      },
+      {
+        label: 'Sell',
+        data: data.sells,
+        borderColor: '#ef4444',
+        backgroundColor: '#ef4444',
+        pointStyle: 'triangle',
+        rotation: 180,
+        pointRadius: 6,
+        showLine: false,
         yAxisID: 'y1',
       }
     ],
@@ -599,6 +626,7 @@ function updateDashboard(s) {
   const costBasis = parseFloat(s.cost_basis);
   const unrealizedPnl = parseFloat(s.unrealized_pnl);
   const rsi = s.rsi;
+  const mlPred = s.ml_prediction;
 
   if (initialBalance === null) initialBalance = pv;
 
@@ -641,18 +669,45 @@ function updateDashboard(s) {
     else rsiEl.className = 'card-value neutral';
   }
 
+  if (mlPred) {
+    const mlEl = document.getElementById('mlPrediction');
+    mlEl.textContent = mlPred;
+    if (mlPred === 'Up') mlEl.className = 'card-value positive';
+    else if (mlPred === 'Down') mlEl.className = 'card-value negative';
+    else mlEl.className = 'card-value neutral';
+  }
+
+  let buyPrice = null;
+  let sellPrice = null;
+  if (s.event_history && s.event_history.length > 0) {
+    const currentEvent = s.event_history[0];
+    if (currentEvent !== lastSeenEvent) {
+      lastSeenEvent = currentEvent;
+      const lowerEvent = currentEvent.toLowerCase();
+      if (lowerEvent.includes('buy') && !lowerEvent.includes('waiting')) {
+        buyPrice = price;
+      } else if (lowerEvent.includes('sell') || lowerEvent.includes('stop')) {
+        sellPrice = price;
+      }
+    }
+  }
+
   // Time series
   const timeLabel = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
   data.labels.push(timeLabel);
   data.portfolio.push(pv);
   data.price.push(price);
   data.rsi.push(rsi);
+  data.buys.push(buyPrice);
+  data.sells.push(sellPrice);
 
   if (data.labels.length > MAX_POINTS) {
     data.labels.shift();
     data.portfolio.shift();
     data.price.shift();
     data.rsi.shift();
+    data.buys.shift();
+    data.sells.shift();
   }
 
   mainChart.update('none');
