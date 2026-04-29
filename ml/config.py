@@ -21,7 +21,7 @@ class ModelConfig:
 class TrainConfig:
     # Labeling parameters
     horizon: int = 50
-    alpha: float = 0.002
+    alpha: float = 0.0005
     
     # Training parameters
     batch_size: int = 64

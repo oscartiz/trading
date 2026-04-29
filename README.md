@@ -1,244 +1,126 @@
-# Crypto Paper Trading Bot
+# HFT Crypto Quantitative Pipeline
 
-A low-latency, async paper trading bot targeting Binance, built in Rust. Designed for long-term accumulation with zero leverage and multiple layers of risk protection.
+A complete, end-to-end high-frequency quantitative trading ecosystem targeting Binance. This repository encompasses everything from raw Level-2 Limit Order Book (LOB) data collection to deep neural network training, vectorized Python backtesting, and a zero-overhead Rust execution engine with a live React dashboard.
 
-> **Paper trading only** — all trades are simulated locally. No Binance account or API keys required.
+> **Paper trading only** — all trades are simulated locally against live market data. No Binance account or API keys required.
 
 ---
 
-## Architecture
+## 🚀 Ecosystem Overview
 
-The system is built on three decoupled pillars communicating exclusively through async MPSC channels. The WebSocket feed never blocks the strategy thread, and the strategy never touches account state directly.
+The pipeline is divided into two distinct components: The **Research & Machine Learning Environment** (Python) and the **Execution Engine** (Rust).
 
 ```
-┌─────────────────────┐         ┌──────────────────────┐
-│   Binance WebSocket  │  ticks  │   DCA Accumulator     │
-│   @aggTrade stream   │────────▶│   Strategy            │
-│                      │──┐      │                       │
-└─────────────────────┘  │      └───────────┬───────────┘
-                          │                  │ orders
-                          │ ticks            ▼
-                   ┌──────▼──────────────────────────────┐
-                   │         Paper Engine                  │
-                   │   (virtual balances, slippage, fees)  │
-                   └──────────────────┬───────────────────┘
-                                      │ execution reports
-                                      ▼
-                               back to Strategy
-```
-
-| Pillar | Responsibility |
-|--------|----------------|
-| **Market Data Feed** | Maintains a resilient WebSocket connection to Binance with automatic reconnection and exponential backoff. Deserializes the raw `@aggTrade` stream into normalized ticks. |
-| **Paper Engine** | Acts as a local matching engine. Simulates order fills with configurable slippage and taker fees. Manages virtual USDT and crypto balances. All math uses `rust_decimal` for deterministic base-10 calculations. |
-| **Strategy** | Consumes ticks, computes indicators, and emits orders through an `ExecutionClient` trait. The strategy is entirely unaware of whether it's talking to the paper engine or a live exchange. |
-
----
-
-## Quick Start
-
-To run the bot and monitor the live dashboard simultaneously:
-
-1. **Start the Bot**: Run the following command in your terminal:
-   ```bash
-   cargo run --release
-   ```
-2. **Open the Dashboard**: Once the bot is running, open your browser and go to:
-   [http://localhost:3030](http://localhost:3030)
-
-> [!TIP]
-> Keep the terminal window and browser side-by-side. The terminal will show the raw execution logs and strategy decisions, while the dashboard provides a high-level visual overview of your portfolio and RSI trends.
-
----
-
-## Strategy: DCA Accumulator
-
-The bot implements a conservative **Dollar-Cost Averaging** strategy designed for long-term holding with minimal risk. The core philosophy is simple: *time in the market beats timing the market.*
-
-### How It Works
-
-The strategy buys small, fixed amounts of BTC at regular intervals — but only when market conditions are favorable. Every potential buy passes through a cascade of filters:
-
-1. **SMA-200 Trend Filter** — Only buy when the current price is above the 200-period simple moving average. This confirms we're in a long-term uptrend and avoids catching falling knives.
-
-2. **RSI Filter** — Skip buys entirely when the 14-period RSI exceeds 70 (overbought). When RSI drops below 30 (oversold), the buy size is increased by 1.5× to take advantage of dips.
-
-3. **Risk Manager Approval** — Every order must pass through six independent guardrails before it can be submitted (see below).
-
-### Sell Behavior
-
-The strategy has exactly two sell triggers — one offensive, one defensive:
-
-| Trigger | Condition | What It Sells |
-|---------|-----------|---------------|
-| **RSI Profit Exit** | RSI > 80 | Only the *profit portion* — keeps cost basis invested |
-| **Trailing Stop-Loss** | Price drops 12% from peak | Entire position — full exit to protect capital |
-
-#### RSI Profit-Taking — How It Works
-
-The bot tracks your **average entry price** (cost basis) across all DCA buys. When RSI exceeds 80 (exceedingly overbought), it calculates how much of your position represents unrealized profit and sells only that:
-
-**Example:** You've DCA'd $500 total into 0.005 BTC (avg entry: $100k). Price runs to $120k and RSI hits 82:
-
-```
-Position value:     0.005 × $120k = $600
-Cost basis at $120k: $500 / $120k  = 0.00417 BTC  ← kept
-Profit portion:     0.005 - 0.00417 = 0.00083 BTC  ← sold
-```
-
-You bank ~$100 in profit and keep 0.00417 BTC — your original $500 of value stays invested. The cost basis accounting scales proportionally on partial sells, so repeated RSI exits remain accurate.
-
-### What It Will NOT Do
-
-- **No short selling** — sells are only defensive (stop-loss) or profit-taking (RSI exit)
-- **No leverage** — order size is always capped to available cash
-- **No chasing** — SMA and RSI filters prevent buying at peaks
-- **No over-concentration** — hard 50% portfolio allocation ceiling
-
----
-
-## Risk Management
-
-Every trade must pass through the risk manager, which enforces six independent guardrails. Each one can independently block a trade:
-
-| Guard | Default | What It Does |
-|-------|---------|--------------|
-| **Max Allocation** | 50% | Never hold more than 50% of total portfolio value in crypto |
-| **Per-Trade Limit** | $200 | Caps any single DCA buy regardless of other factors |
-| **Drawdown Circuit Breaker** | −15% | Halts ALL buying if portfolio drops 15% from its high-water mark. Auto-resets on new all-time highs. |
-| **Cooldown** | 5 min | Minimum interval between consecutive trades to prevent overtrading |
-| **Volatility Scaling** | 2.5% / 5% | Halves position size when volatility exceeds 2.5%. Suspends buying entirely above 5%. |
-| **Trailing Stop** | −12% | Sells the entire position if price drops 12% from its peak |
-
----
-
-## Technical Indicators
-
-All indicators are computed using `rust_decimal` for deterministic, floating-point-free calculations:
-
-- **RSI (Relative Strength Index)** — 14-period, Wilder smoothing method. Used to filter overbought/oversold conditions.
-- **SMA (Simple Moving Average)** — 200-period. Used as a long-term trend confirmation filter.
-- **Volatility (MAD)** — Mean Absolute Deviation of returns over a 20-period window. Used for position sizing adjustments.
-
----
-
-## Project Structure
-
-```
-src/
-├── main.rs                  # Runtime init, channel plumbing, task spawning
-├── config.rs                # Runtime configuration (symbol, fees, slippage)
-├── types.rs                 # Shared channel message types
-├── error.rs                 # Unified error types
-├── feed/
-│   ├── mod.rs
-│   └── binance.rs           # WebSocket feed with reconnection
-├── engine/
-│   ├── mod.rs
-│   ├── account.rs           # Virtual balance tracking
-│   └── matching.rs          # Paper matching engine
-└── strategy/
-    ├── mod.rs
-    ├── traits.rs            # ExecutionClient trait + channel impl
-    ├── indicators.rs        # RSI, SMA, volatility (pure math)
-    ├── risk.rs              # Risk manager (6 guardrails)
-    └── dca_accumulator.rs   # DCA strategy implementation
+┌────────────────────────────────┐         ┌───────────────────────────────┐
+│       Research & ML (Python)   │         │     Execution Engine (Rust)   │
+│                                │         │                               │
+│  1. WebSocket LOB Collection   │         │  1. Binance Async WebSocket   │
+│  2. DeepLOB Model Training     │  weights│  2. Candle-Core Inference     │
+│  3. Vectorized HFT Backtesting │────────▶│  3. Async Paper Engine        │
+│  4. Matplotlib Visualizations  │ .safetensors 4. Live React Dashboard    │
+└────────────────────────────────┘         └───────────────────────────────┘
 ```
 
 ---
 
-## Getting Started
+## 🔬 1. Research & ML Environment (`/ml`)
 
-### Prerequisites
+The `ml/` directory contains the quantitative research stack used to discover alpha and validate strategies against historical ticks. 
 
-- [Rust](https://rustup.rs/) (1.75+)
-- Internet connection (for the Binance WebSocket stream)
-- No Binance account needed
+### Core Features
 
-### Run
+1. **Live Data Collection (`ws_collector.py`)**
+   - Connects to Binance's `@depth20` stream.
+   - Hoards ultra-high-frequency limit order book snapshots (bids, asks, volumes) to build custom historical datasets for training.
 
-```bash
-# Default (info-level logging)
-cargo run --release
+2. **Deep Limit Order Book Model (`model/deeplob.py`)**
+   - Implements the state-of-the-art DeepLOB architecture.
+   - Features 1D/2D Convolutions for spatial pattern recognition, an Inception module for multi-scale feature extraction, and an LSTM for temporal dynamics.
+   - Predicts mid-price micro-structure movements (Up, Down, Stationary) over the next $N$ milliseconds.
 
-# Verbose (see every indicator computation)
-RUST_LOG=debug cargo run --release
-```
+3. **Robust Training Pipeline (`train.py`)**
+   - **Zero-Leakage Splitting**: Chronological slicing (70/15/15) to prevent forward-looking bias.
+   - **Stateful Z-Score Normalization**: Scales data exclusively on the training split parameters.
+   - **Class Imbalance Handling**: Dynamically calculates inverse frequencies to penalize the model for defaulting to "Stationary", forcing it to find real predictive edge.
+   - **Metrics**: Evaluates performance using Macro F1-Scores and Confusion Matrices.
 
-The bot will:
-1. Connect to Binance's public WebSocket stream
-2. Warm up the 200-tick indicator buffer (~5–15 minutes depending on volume)
-3. Begin evaluating DCA entry signals
-4. Log every trade decision, fill, and risk gate activation
-
-Stop with `Ctrl+C`.
-
-### Configuration
-
-Edit `src/config.rs` for runtime settings:
-
-```rust
-initial_balance: dec!(10_000),   // Starting virtual USDT
-symbol: "btcusdt".into(),        // Trading pair
-fee_rate: dec!(0.001),           // Simulated taker fee (10 bps)
-slippage_bps: dec!(0.0005),      // Simulated slippage (5 bps)
-```
-
-Edit `src/strategy/risk.rs` → `RiskParams::default()` for risk parameters.
-
-### US Users
-
-If `stream.binance.com` is geo-blocked, change the WebSocket URL in `config.rs`:
-
-```rust
-ws_url: "wss://stream.binance.us:9443/ws".into(),
-```
+4. **Vectorized HFT Backtester (`backtest.py`)**
+   - Ingests collected historical snapshots.
+   - Vectorizes inference using PyTorch (`mps`/`cuda`) to achieve sub-millisecond execution times on massive datasets.
+   - **Realistic Friction**: Simulates an exact 50ms exchange queuing latency and strictly enforces Taker fees/Slippage.
+   - **Visualization**: Outputs `matplotlib` charts detailing portfolio erosion/growth against exact execution markers on the tick timeline.
 
 ---
 
-## Dependencies
+## ⚡ 2. Execution Engine (`/src`)
 
-| Crate | Purpose |
-|-------|---------|
-| `tokio` | Async runtime with full features |
-| `tokio-tungstenite` | WebSocket client for Binance stream |
-| `serde` / `serde_json` | Stream deserialization |
-| `rust_decimal` | Deterministic base-10 financial math |
-| `tracing` | Structured, leveled logging |
-| `async-trait` | Async trait support for `ExecutionClient` |
-| `thiserror` / `anyhow` | Error handling |
+The Rust application serves as the low-latency production environment. It consumes the `.safetensors` model weights generated by the Python pipeline and runs the actual trading simulation.
+
+### Core Features
+
+1. **Zero-Overhead Inference (`strategy/ml.rs`)**
+   - Utilizes HuggingFace's `candle-core` to load the PyTorch weights.
+   - Performs real-time tensor allocations and forward passes directly inside the Rust event loop, eliminating Python overhead entirely.
+
+2. **Decoupled Async Architecture**
+   - The WebSocket feed, Strategy Evaluator, and Paper Matching Engine are isolated into separate Tokio tasks, communicating strictly via MPSC channels.
+   - The feed never blocks the strategy, and the strategy never blocks the matching engine.
+
+3. **Strict Risk Management (`strategy/risk.rs`)**
+   - **Drawdown Circuit Breaker**: Halts buying if the portfolio drops 15% from its high-water mark.
+   - **Trailing Stop-Loss**: Exits positions entirely on a 12% drop from the peak.
+   - **Volatility Scaling**: Dynamically adjusts position sizing based on real-time order book volatility.
+
+4. **Live React Dashboard (`web/`)**
+   - A real-time monitoring interface served at `http://localhost:3030`.
+   - Displays live portfolio allocations, execution logs, and instantaneous neural network predictions in an interactive UI.
 
 ---
 
----
+## 🛠️ Quick Start Guide
 
-## Machine Learning Pipeline (DeepLOB) & Inference
+### 1. Python ML & Backtesting
+To collect live data, train the model, and visualize a backtest:
 
-The project includes a state-of-the-art Python machine learning pipeline (`ml/`) designed to train a Deep Limit Order Book (DeepLOB) model. This model predicts high-frequency mid-price movements (Up, Down, Stationary) directly from raw level-2 market data.
-
-### Architecture Features
-- **CNN + Inception + LSTM**: Uses 1D/2D convolutions to extract spatial patterns from the order book, an Inception module for multi-scale feature extraction, and an LSTM to model temporal sequence dependencies.
-- **Smoothed Forward-Rolling Window Labeling**: Avoids micro-structure noise by comparing current prices to a rolling average of future horizons, classifying moves based on a dynamically adaptable volatility threshold.
-- **Relative Spread Normalization**: Normalizes prices relative to the mid-price to preserve spread dynamics, and scales volumes as a fraction of total visible depth.
-- **Rust Inference Engine**: The model architecture is fully recreated in Rust using `candle-core` and `candle-nn`. At runtime, the bot dynamically loads the trained `deeplob.safetensors` model weights and performs zero-overhead, real-time predictions inside the core event loop on a sliding buffer of order book snapshots.
-- **Dashboard Visualization**: The live dashboard features a DeepLOB card that dynamically visualizes the high-frequency ML inference output. 
-
-To run the training pipeline (using synthetic data for demonstration):
 ```bash
 cd ml
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+# Step 1: Collect 2 minutes of live Binance depth data
+python data/ws_collector.py
+
+# Step 2: Train the model (exports weights to model/checkpoints/)
 python train.py
+
+# Step 3: Run the vectorized backtest & generate visualization
+python backtest.py
+
+# Step 4: View the backtest results
+open backtest_results.png
 ```
+
+### 2. Rust Live Paper Trading
+To run the ultra-low-latency execution engine using the trained model weights:
+
+```bash
+# Ensure you are in the project root directory
+cargo run --release
+```
+Once the Rust engine says `Server started on http://127.0.0.1:3030`, open your browser and navigate to:
+[http://localhost:3030](http://localhost:3030)
+
+> [!TIP]
+> Keep the terminal window and browser side-by-side. The terminal will stream raw execution logs, while the React dashboard provides a beautiful visual breakdown of the neural network's live inferences and portfolio allocations.
 
 ---
 
-## Future Roadmap
+## 🔮 Future Roadmap
 
-- **Live Trading** — Implement `ExecutionClient` against the Binance REST API. The strategy code changes zero lines.
-- **Multi-Symbol** — DCA into a basket (BTC + ETH) with per-asset allocation limits.
-- **Persistence** — Log fills to SQLite for post-session P&L analysis and backtesting.
+- **Live Trading Mode** — Implement the `ExecutionClient` interface directly against the authenticated Binance REST/FIX APIs.
+- **Maker Strategies** — Upgrade the backtester and matching engine to simulate resting limit orders in the queue (Maker rebates) rather than aggressive Taker sweeps.
+- **Rust ML Training** — Explore utilizing `candle`'s backward passes to move the entire ML training loop natively into Rust.
 
 ---
 
