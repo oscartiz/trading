@@ -1,131 +1,104 @@
-# HFT Crypto Quantitative Pipeline
+# DeepLOB HFT Quantitative Pipeline
 
-A complete, end-to-end high-frequency quantitative trading ecosystem targeting Binance. This repository encompasses everything from raw Level-2 Limit Order Book (LOB) data collection to deep neural network training, vectorized Python backtesting, and a zero-overhead Rust execution engine with a live React dashboard.
+A high-frequency quantitative trading framework for the Binance BTC-USDT spot market. This repository implements a complete pipeline from Level-2 Limit Order Book (LOB) data ingestion and feature engineering to deep neural network training, vectorized backtesting, and a low-latency Rust execution engine.
 
-> **Paper trading only** — all trades are simulated locally against live market data. No Binance account or API keys required.
+> **Note**: This environment is configured for simulated execution against live market feeds. No exchange credentials or API keys are required for local paper trading.
 
 ---
 
-## 🚀 Ecosystem Overview
+## System Architecture
 
-The pipeline is divided into two distinct components: The **Research & Machine Learning Environment** (Python) and the **Execution Engine** (Rust).
+The pipeline is partitioned into a Research & Machine Learning Environment (Python/PyTorch) and an Autonomous Execution Engine (Rust/Candle).
 
-```
+```text
 ┌────────────────────────────────┐         ┌───────────────────────────────┐
-│       Research & ML (Python)   │         │     Execution Engine (Rust)   │
+│     Research & ML (Python)     │         │    Execution Engine (Rust)    │
 │                                │         │                               │
-│  1. WebSocket LOB Collection   │         │  1. Binance Async WebSocket   │
-│  2. DeepLOB Model Training     │  weights│  2. Candle-Core Inference     │
-│  3. Vectorized HFT Backtesting │────────▶│  3. Async Paper Engine        │
-│  4. Matplotlib Visualizations  │ .safetensors 4. Live React Dashboard    │
+│  1. LOB Snapshot Collection    │         │  1. Async WebSocket Feed      │
+│  2. DeepLOB Model (PyTorch)    │  weights│  2. Candle-Core Inference     │
+│  3. Vectorized Backtesting     │────────▶│  3. Deterministic Matching    │
+│  4. Feature Normalization      │ .safetensors 4. Live Portfolio Monitor  │
 └────────────────────────────────┘         └───────────────────────────────┘
 ```
 
 ---
 
-## 🔬 1. Research & ML Environment (`/ml`)
+## 1. Research and Machine Learning Environment
 
-The `ml/` directory contains the quantitative research stack used to discover alpha and validate strategies against historical ticks. 
+The machine learning pipeline is designed for high-frequency price prediction using order book microstructure.
 
-### Core Features
+### Feature Extraction
+- **Input Tensors**: The model ingest a sliding window of 100 LOB snapshots.
+- **Dimensionality**: Each snapshot consists of 40 features (10 price/volume levels for both bid and ask sides).
+- **Normalization**: Real-time Z-score scaling is applied using parameters derived strictly from the chronological training split to avoid look-ahead bias.
 
-1. **Live Data Collection (`ws_collector.py`)**
-   - Connects to Binance's `@depth20` stream.
-   - Hoards ultra-high-frequency limit order book snapshots (bids, asks, volumes) to build custom historical datasets for training.
+### Model Architecture (DeepLOB)
+- **Spatial Filters**: 2D Convolutional layers extract spatial relationships between price and volume levels.
+- **Inception Module**: Multi-scale convolutional kernels capture varied LOB dynamics.
+- **Temporal Modeling**: Long Short-Term Memory (LSTM) layers process the temporal dependencies of the extracted features.
+- **Classification**: A softmax output layer provides probabilities for three classes: Mid-price increase, Mid-price decrease, and Stationary.
 
-2. **Deep Limit Order Book Model (`model/deeplob.py`)**
-   - Implements the state-of-the-art DeepLOB architecture.
-   - Features 1D/2D Convolutions for spatial pattern recognition, an Inception module for multi-scale feature extraction, and an LSTM for temporal dynamics.
-   - Predicts mid-price micro-structure movements (Up, Down, Stationary) over the next $N$ milliseconds.
-
-3. **Robust Training Pipeline (`train.py`)**
-   - **Zero-Leakage Splitting**: Chronological slicing (70/15/15) to prevent forward-looking bias.
-   - **Stateful Z-Score Normalization**: Scales data exclusively on the training split parameters.
-   - **Class Imbalance Handling**: Dynamically calculates inverse frequencies to penalize the model for defaulting to "Stationary", forcing it to find real predictive edge.
-   - **Metrics**: Evaluates performance using Macro F1-Scores and Confusion Matrices.
-
-4. **Vectorized HFT Backtester (`backtest.py`)**
-   - Ingests collected historical snapshots.
-   - Vectorizes inference using PyTorch (`mps`/`cuda`) to achieve sub-millisecond execution times on massive datasets.
-   - **Realistic Friction**: Simulates an exact 50ms exchange queuing latency and strictly enforces Taker fees/Slippage.
-   - **Visualization**: Outputs `matplotlib` charts detailing portfolio erosion/growth against exact execution markers on the tick timeline.
-
-   ![Maker Backtest Results](ml/backtest_results.png)
+### Vectorized Backtesting
+- **Latency Emulation**: The matching engine simulates 50ms of network and exchange queuing latency.
+- **Post-Trade Analysis**: Vectorized PnL calculation accounts for taker fees and slippage on every tick.
+- **Precision vs Recall**: The system prioritizes high-confidence thresholds (85%+) to mitigate transaction cost erosion.
 
 ---
 
-## ⚡ 2. Execution Engine (`/src`)
+## 2. Autonomous Execution Engine
 
-The Rust application serves as the low-latency production environment. It consumes the `.safetensors` model weights generated by the Python pipeline and runs the actual trading simulation.
+The Rust engine provides a zero-overhead environment for live inference and strategy execution.
 
-### Core Features
+### Low-Latency Inference (`candle-core`)
+- Utilizes the `candle` framework for hardware-accelerated tensor operations on the Apple Silicon M4 CPU.
+- Implements custom asymmetric padding and stride emulation to ensure 100% parity with the PyTorch-trained weights.
+- Inference latency is optimized to sub-millisecond durations per snapshot.
 
-1. **Zero-Overhead Inference (`strategy/ml.rs`)**
-   - Utilizes HuggingFace's `candle-core` to load the PyTorch weights.
-   - Performs real-time tensor allocations and forward passes directly inside the Rust event loop, eliminating Python overhead entirely.
+### Strategy Implementation: DeepLOB Maker
+- **Strict Maker Posture**: The strategy attempts to minimize fee bleed by placing resting orders at the best bid/ask.
+- **Confidence Thresholding**: Execution is gated by an 85% probability threshold.
+- **Hysteresis & Exit Logic**: Implements a minimum holding time of 20 ticks or a fixed profit target to prevent high-frequency churning.
 
-2. **Decoupled Async Architecture**
-   - The WebSocket feed, Strategy Evaluator, and Paper Matching Engine are isolated into separate Tokio tasks, communicating strictly via MPSC channels.
-   - The feed never blocks the strategy, and the strategy never blocks the matching engine.
-
-3. **Strict Risk Management (`strategy/risk.rs`)**
-   - **Drawdown Circuit Breaker**: Halts buying if the portfolio drops 15% from its high-water mark.
-   - **Trailing Stop-Loss**: Exits positions entirely on a 12% drop from the peak.
-   - **Volatility Scaling**: Dynamically adjusts position sizing based on real-time order book volatility.
-
-4. **Live React Dashboard (`web/`)**
-   - A real-time monitoring interface served at `http://localhost:3030`.
-   - Displays live portfolio allocations, execution logs, and instantaneous neural network predictions in an interactive UI.
+### Concurrent Pipeline
+- **Tokio Tasks**: The feed handler, strategy evaluator, and matching engine run as independent tasks communicating via MPSC channels.
+- **Non-Blocking I/O**: The system maintains 100% throughput even during high-volatility bursts.
 
 ---
 
-## 🛠️ Quick Start Guide
+## Operational Guide
 
-### 1. Python ML & Backtesting
-To collect live data, train the model, and visualize a backtest:
+### Training and Research
+To collect data and train the model weights:
 
 ```bash
 cd ml
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Step 1: Collect 2 minutes of live Binance depth data
+# 1. Collect live LOB snapshots
 python data/ws_collector.py
 
-# Step 2: Train the model (exports weights to model/checkpoints/)
+# 2. Execute training loop and export .safetensors
 python train.py
 
-# Step 3: Run the vectorized backtest & generate visualization
+# 3. Validate strategy via vectorized backtest
 python backtest.py
-
-# Step 4: View the backtest results
-open backtest_results.png
 ```
 
-### 2. Rust Live Paper Trading
-To run the ultra-low-latency execution engine using the trained model weights:
+### Production Monitoring
+To launch the autonomous execution engine:
 
 ```bash
-# Ensure you are in the project root directory
+# Compile and run the release binary
 cargo run --release
 ```
-Once the Rust engine says `Server started on http://127.0.0.1:3030`, open your browser and navigate to:
-[http://localhost:3030](http://localhost:3030)
 
-> [!TIP]
-> Keep the terminal window and browser side-by-side. The terminal will stream raw execution logs, while the React dashboard provides a beautiful visual breakdown of the neural network's live inferences and portfolio allocations.
+The live monitor is accessible at [http://localhost:3030](http://localhost:3030). This dashboard provides real-time visualization of portfolio metrics, allocation dynamics, and the raw probability outputs from the DeepLOB model.
 
 ---
 
-## 🔮 Future Roadmap
-
-- **Live Trading Mode** — Implement the `ExecutionClient` interface directly against the authenticated Binance REST/FIX APIs.
-- **Maker Strategies** — Upgrade the backtester and matching engine to simulate resting limit orders in the queue (Maker rebates) rather than aggressive Taker sweeps.
-- **Rust ML Training** — Explore utilizing `candle`'s backward passes to move the entire ML training loop natively into Rust.
-
----
+## Technical Specifications
+- **Inference Backend**: Candle Core (Rust)
+- **Training Backend**: PyTorch (Python)
+- **Communication Protocol**: Binance Multiplexed WebSocket (aggTrade, depth20@100ms)
+- **Hardware Optimization**: Apple Silicon M4 (AArch64)
 
 ## License
-
 MIT

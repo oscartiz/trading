@@ -8,8 +8,7 @@
 //! - `dca_accumulator` — Conservative DCA with RSI/SMA filters and risk management
 //! - `traits` — Core trait definitions and the reference EMA crossover strategy
 
-pub mod dca_accumulator;
-pub mod indicators;
+pub mod deeplob_maker;
+pub mod ml;
 pub mod risk;
 pub mod traits;
-pub mod ml;

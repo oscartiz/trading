@@ -149,7 +149,7 @@ def train():
         cm = confusion_matrix(all_targets, all_preds, labels=[0, 1, 2])
         
         print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Macro F1: {macro_f1:.4f}")
-        print("Confusion Matrix [Up(0), Down(1), Stationary(2)]:\n", cm)
+        print("Confusion Matrix [Down(0), Stationary(1), Up(2)]:\n", cm)
         
         scheduler.step(val_loss)
         

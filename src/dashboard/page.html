@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Paper Trading — Live Dashboard</title>
+<title>DeepLOB — Live Monitor</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -56,26 +56,6 @@
     background: linear-gradient(135deg, var(--accent-green), var(--accent-blue));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .logo {
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    object-fit: cover;
-    border: 2px solid var(--border);
-    box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
-    transition: box-shadow 0.3s;
-  }
-
-  .logo:hover {
-    box-shadow: 0 0 18px rgba(16, 185, 129, 0.4);
   }
 
   .status-badge {
@@ -203,8 +183,6 @@
     overflow-y: auto;
   }
 
-  .event-log .card-label { margin-bottom: 0.75rem; }
-
   .event-list {
     list-style: none;
     font-family: 'JetBrains Mono', monospace;
@@ -250,107 +228,13 @@
 
   @media (max-width: 1024px) {
     .dashboard { grid-template-columns: repeat(2, 1fr); }
-    .chart-card.wide, .event-log, .action-bar { grid-column: span 2; }
+    .chart-card.wide, .event-log { grid-column: span 2; }
     .chart-card.extra-wide { grid-column: span 2; }
   }
 
   @media (max-width: 640px) {
     .dashboard { grid-template-columns: 1fr; padding: 1rem; }
-    .chart-card, .chart-card.wide, .chart-card.extra-wide, .event-log, .action-bar { grid-column: span 1; }
-    .action-bar { flex-direction: column; }
-  }
-
-  /* Action Bar */
-  .action-bar {
-    grid-column: span 6;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1.25rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-  }
-
-  .action-bar .label {
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .notional-input {
-    width: 120px;
-    padding: 0.5rem 0.75rem;
-    background: var(--bg-primary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text-primary);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.85rem;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-
-  .notional-input:focus {
-    border-color: var(--accent-blue);
-  }
-
-  .btn {
-    padding: 0.55rem 1.25rem;
-    border: none;
-    border-radius: 8px;
-    font-family: 'Inter', sans-serif;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  .btn-buy {
-    background: var(--accent-green);
-    color: #fff;
-    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
-  }
-
-  .btn-buy:hover {
-    background: #059669;
-    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
-    transform: translateY(-1px);
-  }
-
-  .btn-buy:active { transform: translateY(0); }
-
-  .btn-panic {
-    background: var(--accent-red);
-    color: #fff;
-    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
-    margin-left: auto;
-  }
-
-  .btn-panic:hover {
-    background: #dc2626;
-    box-shadow: 0 4px 16px rgba(239, 68, 68, 0.5);
-    transform: translateY(-1px);
-  }
-
-  .btn-panic:active { transform: translateY(0); }
-
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    transform: none !important;
-  }
-
-  .btn-feedback {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    min-width: 80px;
+    .chart-card, .chart-card.wide, .chart-card.extra-wide, .event-log { grid-column: span 1; }
   }
 </style>
 </head>
@@ -358,8 +242,7 @@
 
 <div class="header">
   <div class="header-left">
-    <img src="/logo.jpg" alt="Logo" class="logo">
-    <h1>⚡ Paper Trading Dashboard</h1>
+    <h1>DeepLOB Live Monitor</h1>
   </div>
   <div class="status-badge">
     <div class="status-dot" id="statusDot"></div>
@@ -402,18 +285,7 @@
   <div class="card">
     <div class="card-label">DeepLOB Pred</div>
     <div class="card-value" id="mlPrediction">—</div>
-    <div class="card-sub neutral">Next 100 Ticks</div>
-  </div>
-
-  <!-- Action Bar -->
-  <div class="action-bar">
-    <span class="label">Manual Trade</span>
-    <span style="color: var(--text-muted); font-size: 0.8rem;">$</span>
-    <input type="number" class="notional-input" id="buyNotional" value="50" min="1" step="10" placeholder="USDT amount">
-    <button class="btn btn-buy" id="btnBuy" onclick="manualBuy()">Buy BTC</button>
-    <span class="btn-feedback" id="buyFeedback"></span>
-    <button class="btn btn-panic" id="btnPanic" onclick="panicSell()">🚨 Sell All</button>
-    <span class="btn-feedback" id="sellFeedback"></span>
+    <div class="card-sub neutral" id="mlStatus">Gathering Market Microstructure</div>
   </div>
 
   <!-- Portfolio Chart -->
@@ -574,7 +446,6 @@ const rsiChart = new Chart(document.getElementById('rsiChart'), {
     maintainAspectRatio: false,
     plugins: {
       legend: { display: false },
-      annotation: {},
     },
     scales: {
       x: { display: true, ticks: { maxTicksLimit: 6, font: { size: 10 } } },
@@ -587,10 +458,6 @@ const rsiChart = new Chart(document.getElementById('rsiChart'), {
   },
 });
 
-// Draw overbought/oversold zones on RSI chart
-const rsiCtx = document.getElementById('rsiChart').getContext('2d');
-
-// ── WebSocket Connection ────────────────────────────────────────────
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
 
@@ -623,14 +490,11 @@ function updateDashboard(s) {
   const qty = parseFloat(s.crypto_qty);
   const quoteBal = parseFloat(s.quote_balance);
   const allocPct = parseFloat(s.allocation_pct);
-  const costBasis = parseFloat(s.cost_basis);
-  const unrealizedPnl = parseFloat(s.unrealized_pnl);
   const rsi = s.rsi;
   const mlPred = s.ml_prediction;
 
   if (initialBalance === null) initialBalance = pv;
 
-  // KPI Cards
   document.getElementById('portfolioValue').textContent = '$' + pv.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
   const totalPnl = pv - initialBalance;
@@ -643,26 +507,21 @@ function updateDashboard(s) {
   const now = new Date(s.timestamp);
   document.getElementById('priceTime').textContent = now.toLocaleTimeString();
 
-  // Available Cash card
   document.getElementById('cashAvailable').textContent = '$' + quoteBal.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const cashPct = pv > 0 ? ((quoteBal / pv) * 100).toFixed(1) : '0.0';
   document.getElementById('cashPct').textContent = cashPct + '% of portfolio';
 
-  // Portfolio breakdown
   const cryptoVal = qty * price;
   document.getElementById('breakdownCash').textContent = '$' + quoteBal.toLocaleString(undefined, {maximumFractionDigits: 0});
   document.getElementById('breakdownCrypto').textContent = '$' + cryptoVal.toLocaleString(undefined, {maximumFractionDigits: 0});
 
-  // Position card
   document.getElementById('position').textContent = qty.toFixed(6) + ' BTC';
   document.getElementById('positionValue').textContent = '≈ $' + cryptoVal.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-  const allocEl = document.getElementById('allocation');
-  allocEl.textContent = allocPct.toFixed(1) + '% allocated';
+  document.getElementById('allocation').textContent = allocPct.toFixed(1) + '% allocated';
 
   if (rsi !== null && rsi !== undefined) {
     document.getElementById('rsiValue').textContent = rsi.toFixed(1);
     document.getElementById('rsiMarker').style.left = `calc(${rsi}% - 2px)`;
-
     const rsiEl = document.getElementById('rsiValue');
     if (rsi > 70) rsiEl.className = 'card-value negative';
     else if (rsi < 30) rsiEl.className = 'card-value positive';
@@ -672,8 +531,8 @@ function updateDashboard(s) {
   if (mlPred) {
     const mlEl = document.getElementById('mlPrediction');
     mlEl.textContent = mlPred;
-    if (mlPred === 'Up') mlEl.className = 'card-value positive';
-    else if (mlPred === 'Down') mlEl.className = 'card-value negative';
+    if (mlPred.includes('Up')) mlEl.className = 'card-value positive';
+    else if (mlPred.includes('Down')) mlEl.className = 'card-value negative';
     else mlEl.className = 'card-value neutral';
   }
 
@@ -684,15 +543,11 @@ function updateDashboard(s) {
     if (currentEvent !== lastSeenEvent) {
       lastSeenEvent = currentEvent;
       const lowerEvent = currentEvent.toLowerCase();
-      if (lowerEvent.includes('buy') && !lowerEvent.includes('waiting')) {
-        buyPrice = price;
-      } else if (lowerEvent.includes('sell') || lowerEvent.includes('stop')) {
-        sellPrice = price;
-      }
+      if (lowerEvent.includes('buy')) buyPrice = price;
+      else if (lowerEvent.includes('sell')) sellPrice = price;
     }
   }
 
-  // Time series
   const timeLabel = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
   data.labels.push(timeLabel);
   data.portfolio.push(pv);
@@ -714,22 +569,17 @@ function updateDashboard(s) {
   rsiChart.update('none');
   document.getElementById('dataPoints').textContent = data.labels.length + ' points';
 
-  // Allocation donut
   allocChart.data.datasets[0].data = [100 - allocPct, allocPct];
   allocChart.update('none');
 
-  // Event log
   if (s.event_history && s.event_history.length > 0) {
     const list = document.getElementById('eventList');
-    const existingCount = list.dataset.count || 0;
-    
-    // Only redraw if history length changed (basic check)
-    if (s.event_history.length != existingCount) {
+    if (s.event_history.length != (list.dataset.count || 0)) {
       list.innerHTML = '';
       s.event_history.forEach(event => {
         const li = document.createElement('li');
         const isBuy = event.toLowerCase().includes('buy');
-        const isSell = event.toLowerCase().includes('sell') || event.toLowerCase().includes('stop');
+        const isSell = event.toLowerCase().includes('sell');
         li.innerHTML = `<span class="event-time"></span><span class="${isBuy ? 'event-buy' : isSell ? 'event-sell' : 'event-info'}">${event}</span>`;
         list.appendChild(li);
       });
@@ -739,72 +589,6 @@ function updateDashboard(s) {
 }
 
 connect();
-
-// ── Manual Trade Actions ─────────────────────────────────────────
-async function manualBuy() {
-  const btn = document.getElementById('btnBuy');
-  const feedback = document.getElementById('buyFeedback');
-  const notional = parseFloat(document.getElementById('buyNotional').value);
-
-  if (isNaN(notional) || notional <= 0) {
-    feedback.textContent = 'Invalid amount';
-    feedback.style.color = 'var(--accent-red)';
-    return;
-  }
-
-  btn.disabled = true;
-  feedback.textContent = 'Submitting...';
-  feedback.style.color = 'var(--accent-amber)';
-
-  try {
-    const res = await fetch('/api/buy', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ notional }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      feedback.textContent = '✓ Submitted';
-      feedback.style.color = 'var(--accent-green)';
-    } else {
-      feedback.textContent = data.error || 'Error';
-      feedback.style.color = 'var(--accent-red)';
-    }
-  } catch (e) {
-    feedback.textContent = 'Failed';
-    feedback.style.color = 'var(--accent-red)';
-  }
-
-  btn.disabled = false;
-  setTimeout(() => { feedback.textContent = ''; }, 3000);
-}
-
-async function panicSell() {
-  const btn = document.getElementById('btnPanic');
-  const feedback = document.getElementById('sellFeedback');
-
-  btn.disabled = true;
-  feedback.textContent = 'Selling...';
-  feedback.style.color = 'var(--accent-amber)';
-
-  try {
-    const res = await fetch('/api/sell-all', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok) {
-      feedback.textContent = '✓ Liquidated';
-      feedback.style.color = 'var(--accent-red)';
-      setTimeout(() => { feedback.textContent = ''; btn.disabled = false; }, 3000);
-    } else {
-      feedback.textContent = data.error || 'Error';
-      feedback.style.color = 'var(--accent-red)';
-      btn.disabled = false;
-    }
-  } catch (e) {
-    feedback.textContent = 'Failed';
-    feedback.style.color = 'var(--accent-red)';
-    btn.disabled = false;
-  }
-}
 </script>
 </body>
 </html>

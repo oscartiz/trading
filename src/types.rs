@@ -125,15 +125,4 @@ pub struct PortfolioSnapshot {
     pub event_history: Vec<String>,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Dashboard → Strategy (manual commands)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Manual commands sent from the dashboard UI to the strategy.
-#[derive(Debug, Clone)]
-pub enum DashboardCommand {
-    /// Manual market buy with a specific USDT notional amount
-    ManualBuy { notional: Decimal },
-    /// Panic sell — liquidate entire position immediately
-    PanicSell,
-}
+// (Manual commands removed to enforce strict autonomous ML execution)

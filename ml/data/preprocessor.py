@@ -24,6 +24,14 @@ class ZScorePreprocessor:
             raise ValueError("Cannot save unfitted preprocessor.")
         np.savez(filepath, mean=self.mean, std=self.std)
         
+        import json
+        json_path = filepath.replace(".npz", ".json")
+        with open(json_path, "w") as f:
+            json.dump({
+                "mean": self.mean.tolist(),
+                "std": self.std.tolist()
+            }, f)
+        
     def load(self, filepath: str):
         data = np.load(filepath)
         self.mean = data['mean']
