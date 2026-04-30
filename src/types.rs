@@ -117,8 +117,6 @@ pub struct PortfolioSnapshot {
     /// Unrealized P&L
     #[serde(with = "rust_decimal::serde::str")]
     pub unrealized_pnl: Decimal,
-    /// Current RSI (if available)
-    pub rsi: Option<f64>,
     /// ML Prediction
     pub ml_prediction: Option<String>,
     /// Recent trade events history

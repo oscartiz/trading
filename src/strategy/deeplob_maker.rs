@@ -263,7 +263,6 @@ pub async fn run_deeplob_strategy<E: ExecutionClient>(
                 allocation_pct,
                 cost_basis: position_entry_price,
                 unrealized_pnl,
-                rsi: None,
                 ml_prediction: Some(current_prediction.clone()),
                 event_history: vec![],
             };
