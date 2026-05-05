@@ -47,6 +47,10 @@ class OrderManager:
             if o["coin"] == coin:
                 self.cancel_order(coin, o["oid"])
 
+    def set_leverage(self, coin: str, leverage: int, is_cross: bool = True) -> None:
+        self.exchange.update_leverage(leverage, coin, is_cross)
+        logger.info("Leverage set | coin={} leverage={}x cross={}", coin, leverage, is_cross)
+
     def get_position(self, coin: str) -> dict | None:
         state = self.info.user_state(self.exchange.account_address)
         for pos in state.get("assetPositions", []):

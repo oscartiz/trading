@@ -21,5 +21,8 @@ class Strategy(ABC):
     async def on_book(self, book: dict) -> None:
         """Called on every L2 book update for self.coin."""
 
+    async def run(self) -> None:
+        """Override for polling-based strategies. Default is a no-op."""
+
     @abstractmethod
     def name(self) -> str: ...
