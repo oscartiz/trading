@@ -24,6 +24,14 @@ Default parameters (conservative, small account):
 | Max hold | 48h | time cap regardless of funding |
 | Poll interval | 10 min | REST API, not WebSocket |
 
+## Backtest results
+
+BTC funding rate strategy — 2024-01-01 → 2025-01-01 | 12 trades | Net P&L: -$6.63
+
+![Backtest BTC 2024](data/charts/backtest_BTC_20240101_20250101.png)
+
+The three panels show: BTC price with labelled long/short entries and profitable/loss exits; the hourly funding rate against entry (0.02%/hr) and exit (0.005%/hr) thresholds; and cumulative USD P&L over the year. The strategy captured several high-funding episodes but gave back gains during the flat mid-year period, finishing slightly negative at $50 notional / 1× leverage — consistent with a conservative parameter set on a year where funding was often below threshold.
+
 ## Setup
 
 **Requirements:** Python 3.11+
