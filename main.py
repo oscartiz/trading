@@ -1,4 +1,5 @@
 """Entry point: wires strategy → orders → risk."""
+import argparse
 import asyncio
 import sys
 
@@ -7,7 +8,9 @@ from loguru import logger
 from config import settings
 from execution import OrderManager, build_clients
 from risk import RiskConfig, RiskManager
-from strategies.funding_rate import FundingConfig, FundingRateStrategy
+from strategies.configs import FundingConfig, RegimeSwitchingConfig
+from strategies.funding_rate import FundingRateStrategy
+from strategies.regime_switching import RegimeSwitchingStrategy
 
 
 def setup_logging() -> None:
@@ -18,34 +21,46 @@ def setup_logging() -> None:
     logger.add("logs/trading.log", rotation="100 MB", retention="30 days", level="DEBUG")
 
 
+def build_strategies(name: str, coin: str, order_manager: OrderManager, risk: RiskManager):
+    if name == "funding":
+        return [FundingRateStrategy(
+            coin=coin, order_manager=order_manager, risk=risk,
+            config=FundingConfig(
+                entry_threshold=0.0002,
+                exit_threshold=0.00005,
+                stop_loss_pct=0.02,
+                max_hold_hours=48,
+                position_size_usd=50.0,
+                poll_interval_seconds=600,
+            ),
+        )]
+    if name == "regime":
+        return [RegimeSwitchingStrategy(
+            coin=coin, order_manager=order_manager, risk=risk,
+            config=RegimeSwitchingConfig(),
+        )]
+    raise ValueError(f"Unknown strategy '{name}'. Available: funding, regime")
+
+
 async def main() -> None:
     setup_logging()
-    logger.info("Starting | testnet={}", settings.testnet)
+
+    parser = argparse.ArgumentParser(description="Run a trading strategy live.")
+    parser.add_argument("--strategy", default="funding", choices=["funding", "regime"])
+    parser.add_argument("--coin", default="BTC")
+    args = parser.parse_args()
+
+    logger.info("Starting | strategy={} coin={} testnet={}", args.strategy, args.coin, settings.testnet)
 
     info, exchange = build_clients()
     order_manager = OrderManager(info, exchange)
     risk = RiskManager(RiskConfig(
-        max_position_usd=150.0,   # never hold more than $150 total
-        max_order_usd=100.0,      # single order cap
-        max_drawdown_pct=0.05,    # halt if equity drops 5%
+        max_position_usd=150.0,
+        max_order_usd=100.0,
+        max_drawdown_pct=0.05,
     ))
 
-    strategies = [
-        FundingRateStrategy(
-            coin="BTC",
-            order_manager=order_manager,
-            risk=risk,
-            config=FundingConfig(
-                entry_threshold=0.0002,       # 0.02%/hr (~175%/yr) — only enter meaningful rates
-                exit_threshold=0.00005,       # 0.005%/hr — exit when rate is no longer worth it
-                stop_loss_pct=0.02,           # 2% stop
-                max_hold_hours=48,
-                position_size_usd=50.0,       # $50 notional
-                poll_interval_seconds=600,    # check every 10 min
-            ),
-        ),
-    ]
-
+    strategies = build_strategies(args.strategy, args.coin, order_manager, risk)
     await asyncio.gather(*[s.run() for s in strategies])
 
 
