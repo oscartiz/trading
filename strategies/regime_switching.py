@@ -56,6 +56,8 @@ class RegimeSwitchingStrategy(Strategy):
         self._bar_index: int = 0
         self._position_side: Side | None = None
         self._target_regime: Regime | None = None
+        self._last_exit_regime: Regime | None = None
+        self._last_exit_bar_index: int = -10**9
 
     def name(self) -> str:
         return "regime_switching"
@@ -121,29 +123,34 @@ class RegimeSwitchingStrategy(Strategy):
         if self._bars_since_fit >= self.cfg.refit_every_bars:
             self._refit()
 
-        snap = self._classify_now()
+        snap, viterbi_label = self._classify_now()
         if snap is None:
             return
 
         mid = self._closes[-1]
+        regime_label = viterbi_label.label if viterbi_label is not None else snap.label
         logger.info(
             "{} | bar={} regime={} p_bear={:.2f} p_chop={:.2f} p_bull={:.2f} "
             "Er={:+.5f} σ={:.5f} close={:.2f} in_position={}",
-            self.coin, self._bar_index, snap.label,
+            self.coin, self._bar_index, regime_label,
             snap.proba[0], snap.proba[1], snap.proba[2],
             snap.expected_return, snap.expected_vol, mid, self._in_position,
         )
 
         if not self._in_position:
-            await self._maybe_enter(snap, mid)
+            await self._maybe_enter(snap, viterbi_label, mid)
         else:
-            await self._maybe_exit(snap, mid)
+            await self._maybe_exit(snap, viterbi_label, mid)
 
     def _classify_now(self):
         returns = log_returns_from_close(np.fromiter(self._closes, dtype=np.float64))
         if returns.size < 10:
-            return None
-        return self._classifier.snapshot(returns)
+            return None, None
+        snap = self._classifier.snapshot(returns)
+        viterbi_label: Regime | None = None
+        if self.cfg.signal_mode == "viterbi":
+            viterbi_label = Regime(int(self._classifier.predict(returns)[-1]))
+        return snap, viterbi_label
 
     def _refit(self) -> None:
         returns = log_returns_from_close(np.fromiter(self._closes, dtype=np.float64))
@@ -161,22 +168,33 @@ class RegimeSwitchingStrategy(Strategy):
     # ------------------------------------------------------------------ #
     #  Entry / exit                                                        #
     # ------------------------------------------------------------------ #
-    async def _maybe_enter(self, snap, mid: float) -> None:
+    async def _maybe_enter(self, snap, viterbi_label: Regime | None, mid: float) -> None:
         p_bear, p_chop, p_bull = snap.proba
-        if p_chop > self.cfg.max_chop_proba:
-            return
+        target: Regime | None = None
 
-        if p_bull >= self.cfg.entry_proba and snap.expected_return >= self.cfg.min_expected_return_per_bar:
-            target: Regime = Regime.BULL
-            side: Side = Side.BUY
-            target_proba: float = float(p_bull)
-        elif p_bear >= self.cfg.entry_proba and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
-            target = Regime.BEAR
-            side = Side.SELL
-            target_proba = float(p_bear)
+        if self.cfg.signal_mode == "viterbi":
+            if viterbi_label == Regime.BULL and snap.expected_return >= self.cfg.min_expected_return_per_bar:
+                target = Regime.BULL
+            elif viterbi_label == Regime.BEAR and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
+                target = Regime.BEAR
         else:
+            if p_chop > self.cfg.max_chop_proba:
+                return
+            if p_bull >= self.cfg.entry_proba and snap.expected_return >= self.cfg.min_expected_return_per_bar:
+                target = Regime.BULL
+            elif p_bear >= self.cfg.entry_proba and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
+                target = Regime.BEAR
+
+        if target is None:
             return
 
+        # Same-regime cooldown after a recent exit.
+        if (self._last_exit_regime == target
+                and (self._bar_index - self._last_exit_bar_index) < self.cfg.same_regime_cooldown_bars):
+            return
+
+        side: Side = Side.BUY if target == Regime.BULL else Side.SELL
+        target_proba: float = float(snap.proba[int(target)])
         scale = max(target_proba, self.cfg.min_size_scale)
         notional = self.cfg.position_size_usd * scale
         size = round(notional / mid, 6)
@@ -197,23 +215,16 @@ class RegimeSwitchingStrategy(Strategy):
             self._target_regime = target
             self.risk.register_order()
 
-    async def _maybe_exit(self, snap, mid: float) -> None:
+    async def _maybe_exit(self, snap, viterbi_label: Regime | None, mid: float) -> None:
         reasons: list[str] = []
         entry_price = self._entry_price
         target = self._target_regime
         if entry_price is None or target is None:
             return
 
-        held_proba = float(snap.proba[int(target)])
-        if held_proba < self.cfg.exit_proba:
-            reasons.append(f"regime weakening (P({target.label})={held_proba:.2f})")
+        held_bars = self._bar_index - self._entry_bar_index
 
-        # Posterior flipped to the opposite side
-        opposite = Regime.BEAR if target == Regime.BULL else Regime.BULL
-        if snap.proba[int(opposite)] >= self.cfg.entry_proba:
-            reasons.append(f"opposing regime dominant (P({opposite.label})={snap.proba[int(opposite)]:.2f})")
-
-        # P&L-based stops
+        # P&L-based hard stops fire any time, regardless of min_hold_bars.
         direction = 1.0 if self._position_side == Side.BUY else -1.0
         pnl_pct = direction * (mid - entry_price) / entry_price
         if pnl_pct < -self.cfg.stop_loss_pct:
@@ -221,10 +232,22 @@ class RegimeSwitchingStrategy(Strategy):
         if self.cfg.take_profit_pct is not None and pnl_pct > self.cfg.take_profit_pct:
             reasons.append(f"take profit hit ({pnl_pct:.2%})")
 
-        # Max hold
-        held_bars = self._bar_index - self._entry_bar_index
-        if held_bars >= self.cfg.max_hold_bars:
-            reasons.append(f"max hold reached ({held_bars} bars)")
+        # Regime/time exits are gated behind min_hold_bars.
+        if not reasons and held_bars >= self.cfg.min_hold_bars:
+            if self.cfg.signal_mode == "viterbi":
+                if viterbi_label is not None and viterbi_label != target:
+                    reasons.append(f"viterbi flipped ({viterbi_label.label})")
+            else:
+                held_proba = float(snap.proba[int(target)])
+                if held_proba < self.cfg.exit_proba:
+                    reasons.append(f"regime weakening (P({target.label})={held_proba:.2f})")
+                opposite = Regime.BEAR if target == Regime.BULL else Regime.BULL
+                if snap.proba[int(opposite)] >= self.cfg.entry_proba:
+                    reasons.append(
+                        f"opposing regime dominant (P({opposite.label})={snap.proba[int(opposite)]:.2f})"
+                    )
+            if not reasons and held_bars >= self.cfg.max_hold_bars:
+                reasons.append(f"max hold reached ({held_bars} bars)")
 
         if not reasons:
             return
@@ -245,6 +268,8 @@ class RegimeSwitchingStrategy(Strategy):
             self._reset()
 
     def _reset(self) -> None:
+        self._last_exit_regime = self._target_regime
+        self._last_exit_bar_index = self._bar_index
         self._in_position = False
         self._entry_price = None
         self._target_regime = None

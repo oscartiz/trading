@@ -25,13 +25,15 @@ Default parameters (conservative, small account):
 | Poll interval | 10 min | REST API, not WebSocket |
 
 ### Regime Switching
-Fits a 3-state Gaussian Hidden Markov Model (HMM) to hourly log returns and labels every bar as **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Trades the smoothed posterior:
+Fits a 3-state Gaussian Hidden Markov Model (HMM) to hourly log returns and labels every bar as **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Designed to **ride a regime to its end**: enter only when the model is highly confident, then hold until the regime itself changes — the regime exit, not a fixed take-profit, is what closes winning trades.
 
-- **P(bull) ≥ 0.65** and chop not dominant → opens long
-- **P(bear) ≥ 0.65** and chop not dominant → opens short
-- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, a 3% stop fires, a 6% take-profit fills, or the 240-bar (10-day) time cap is hit
+- **P(bull) ≥ 0.85** and chop not dominant → opens long
+- **P(bear) ≥ 0.85** and chop not dominant → opens short
+- Holds for at least `min_hold_bars` (3 days) so the smoothed posterior can't whipsaw a fresh entry
+- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 30-day time cap is hit — there is **no fixed take-profit**
+- After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (7 days) so we don't immediately re-open the trade we just closed
 
-The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper). See `strategies/configs.py:RegimeSwitchingConfig` for the full parameter set.
+The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper). See `strategies/configs.py:RegimeSwitchingConfig` for the full parameter set, and `tools/regime_sweep.py` for the parameter-sweep harness used to pick the defaults.
 
 ## Backtest results
 
@@ -41,11 +43,19 @@ The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly b
 
 The three panels show: BTC price with labelled long/short entries and profitable/loss exits; the hourly funding rate against entry (0.02%/hr) and exit (0.005%/hr) thresholds; and cumulative USD P&L over the year. The strategy captured several high-funding episodes but gave back gains during the flat mid-year period, finishing slightly negative at $50 notional / 1× leverage — consistent with a conservative parameter set on a year where funding was often below threshold.
 
-### Regime switching — BTC 2024 | 315 trades | Net P&L: -$2.48
+### Regime switching — BTC 2024 | 28 trades | Net P&L: +$30.16 | Sharpe 1.49
 
 ![Regime BTC 2024](data/charts/regime_BTC_20240101_20250101.png)
 
-Run with `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`. The three panels show: BTC price with regime-shaded background (red=bear, grey=chop, green=bull) and labelled trade entries/exits; the rolling smoothed posteriors P(bear), P(chop), P(bull) with the entry/exit thresholds; and cumulative USD P&L. With the default thresholds (0.65/0.45) the strategy overtrades — 298 of 315 exits fire on `regime_weakened`, indicating the band is being whipsawed by smoothing noise. Win rate 44.8%, Sharpe -0.116, max drawdown 25% of position size. A wider entry/exit band, a minimum-hold-bars floor, or switching from smoothed to filtered posteriors at the live edge are the natural next levers to pull.
+Run with `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`. The three panels show: BTC price with regime-shaded background (red=bear, grey=chop, green=bull) and labelled trade entries/exits; the rolling smoothed posteriors P(bear), P(chop), P(bull) with the entry/exit thresholds; and cumulative USD P&L.
+
+The first iteration of this strategy used `entry ≥ 0.65 / exit < 0.45 / 3% stop / 6% TP / 240-bar max hold` and lost money on 315 trades (-$2.48, Sharpe -0.12). 298 of those 315 exits fired on `regime_weakened`, meaning the smoothed posterior was wobbling across the 0.45 threshold and stopping us out before any regime had time to play out. Three changes fixed it:
+
+1. **High-confidence entry** — `P ≥ 0.85` instead of `0.65`. The market spends a small fraction of time in a high-conviction regime, and entries during that fraction have real edge; entries below that threshold are noise.
+2. **Wide stop, no take-profit** — 12% stop and `take_profit_pct=None`. The intent is to ride the regime to its actual end, so the regime change (not a price cap) does the exiting. With the 0.85 entry gate, the wide stop is rarely tested — zero stop-outs across all 28 trades on this period.
+3. **Persistence guards** — `min_hold_bars=72` (3 days) before any regime-based exit fires, plus `same_regime_cooldown_bars=168` (7 days) preventing re-entry into the same regime we just left. Together these turn a single regime episode into a single trade.
+
+Result on BTC 2024: **28 trades (14 long / 14 short), 57.1% win rate, 74.4h avg hold, +$30.16 net at $100 notional / 1×, Sharpe 1.49, max drawdown -17% of position size, 27 of 28 exits via `regime_weakened`** (the remaining one was the open trade closed at the end of the backtest). The defaults in `RegimeSwitchingConfig` were picked by `tools/regime_sweep.py`, which compares 9 configurations across the same period; see that script for the alternatives considered. **Caveats:** this is a single-period in-sample fit on a single coin — running the same sweep on ETH and on 2022/2023 BTC is the obvious next step before trusting these defaults out-of-sample.
 
 ## Setup
 
@@ -126,6 +136,8 @@ trading/
 │   └── metrics.py            # backtest metrics
 ├── backtest.py       # CLI: funding-rate backtest
 ├── regime_backtest.py # CLI: regime-switching backtest
+├── tools/
+│   └── regime_sweep.py # parameter-sweep harness for the regime strategy
 ├── research/         # Jupyter notebooks
 ├── tests/
 └── main.py           # entry point (--strategy funding|regime)

@@ -107,6 +107,8 @@ def run_regime_backtest(
     target_regime: Regime = Regime.CHOP
     bars_since_fit = 0
     n_refits = 0
+    last_exit_regime: Regime | None = None
+    last_exit_idx: int = -10**9
 
     # Initial fit on the first window
     init_returns = log_returns_from_close(closes[: cfg.train_window_bars + 1])
@@ -129,12 +131,15 @@ def run_regime_backtest(
         if returns.size < 5:
             continue
         snap = classifier.snapshot(returns)
+        viterbi_label: Regime | None = None
+        if cfg.signal_mode == "viterbi":
+            viterbi_label = Regime(int(classifier.predict(returns)[-1]))
         ts = timestamps[t]
         close = closes[t]
 
         regime_rows.append({
             "timestamp": ts,
-            "regime": snap.label,
+            "regime": (viterbi_label.label if viterbi_label is not None else snap.label),
             "p_bear": float(snap.proba[0]),
             "p_chop": float(snap.proba[1]),
             "p_bull": float(snap.proba[2]),
@@ -143,9 +148,6 @@ def run_regime_backtest(
 
         # ---- exit handling ----
         if in_position:
-            held_proba = float(snap.proba[int(target_regime)])
-            opposite = Regime.BEAR if target_regime == Regime.BULL else Regime.BULL
-            opposite_proba = float(snap.proba[int(opposite)])
             held_bars = t - entry_idx
             direction = 1.0 if side == "long" else -1.0
             adverse = lows[t] if side == "long" else highs[t]
@@ -155,6 +157,7 @@ def run_regime_backtest(
 
             reason = ""
             exit_price = close
+            # Hard risk exits fire regardless of min_hold_bars.
             if adverse_pnl_pct < -cfg.stop_loss_pct:
                 reason = "stop_loss"
                 exit_price = entry_price * (1 - cfg.stop_loss_pct) if side == "long" \
@@ -163,12 +166,20 @@ def run_regime_backtest(
                 reason = "take_profit"
                 exit_price = entry_price * (1 + cfg.take_profit_pct) if side == "long" \
                     else entry_price * (1 - cfg.take_profit_pct)
-            elif held_proba < cfg.exit_proba:
-                reason = "regime_weakened"
-            elif opposite_proba >= cfg.entry_proba:
-                reason = "regime_flipped"
-            elif held_bars >= cfg.max_hold_bars:
-                reason = "max_hold"
+            elif held_bars >= cfg.min_hold_bars:
+                if cfg.signal_mode == "viterbi":
+                    if viterbi_label is not None and viterbi_label != target_regime:
+                        reason = "regime_flipped"
+                else:
+                    held_proba = float(snap.proba[int(target_regime)])
+                    opposite = Regime.BEAR if target_regime == Regime.BULL else Regime.BULL
+                    opposite_proba = float(snap.proba[int(opposite)])
+                    if held_proba < cfg.exit_proba:
+                        reason = "regime_weakened"
+                    elif opposite_proba >= cfg.entry_proba:
+                        reason = "regime_flipped"
+                if not reason and held_bars >= cfg.max_hold_bars:
+                    reason = "max_hold"
 
             if reason:
                 fees = 2 * fee_rate * cfg.position_size_usd
@@ -187,22 +198,35 @@ def run_regime_backtest(
                 trades.append(trade)
                 realised_pnl += trade.total_pnl
                 in_position = False
+                last_exit_regime = target_regime
+                last_exit_idx = t
 
         # ---- entry handling (new entries are gated on the same bar after exits) ----
-        if not in_position and snap.proba[1] <= cfg.max_chop_proba:
-            if (snap.proba[2] >= cfg.entry_proba
-                    and snap.expected_return >= cfg.min_expected_return_per_bar):
+        if not in_position:
+            target: Regime | None = None
+            if cfg.signal_mode == "viterbi":
+                if viterbi_label == Regime.BULL and snap.expected_return >= cfg.min_expected_return_per_bar:
+                    target = Regime.BULL
+                elif viterbi_label == Regime.BEAR and snap.expected_return <= -cfg.min_expected_return_per_bar:
+                    target = Regime.BEAR
+            elif snap.proba[1] <= cfg.max_chop_proba:
+                if (snap.proba[2] >= cfg.entry_proba
+                        and snap.expected_return >= cfg.min_expected_return_per_bar):
+                    target = Regime.BULL
+                elif (snap.proba[0] >= cfg.entry_proba
+                        and snap.expected_return <= -cfg.min_expected_return_per_bar):
+                    target = Regime.BEAR
+
+            # Same-regime cooldown: don't re-enter the regime we just exited.
+            if (target is not None
+                    and last_exit_regime == target
+                    and (t - last_exit_idx) < cfg.same_regime_cooldown_bars):
+                target = None
+
+            if target is not None:
                 in_position = True
-                side = "long"
-                target_regime = Regime.BULL
-                entry_price = close
-                entry_idx = t
-                entry_ts = ts
-            elif (snap.proba[0] >= cfg.entry_proba
-                    and snap.expected_return <= -cfg.min_expected_return_per_bar):
-                in_position = True
-                side = "short"
-                target_regime = Regime.BEAR
+                side = "long" if target == Regime.BULL else "short"
+                target_regime = target
                 entry_price = close
                 entry_idx = t
                 entry_ts = ts
@@ -312,10 +336,11 @@ def print_regime_metrics(result: RegimeBacktestResult) -> None:
     print("=" * 60)
     print(f"  Period       : {result.start:%Y-%m-%d} → {result.end:%Y-%m-%d}  ({m['period_days']} days)")
     print(f"  HMM window   : {cfg.train_window_bars} bars   refits: {m['n_refits']}")
+    print(f"  Signal mode  : {cfg.signal_mode}")
     print(f"  Entry P      : ≥{cfg.entry_proba:.2f}    Exit P: <{cfg.exit_proba:.2f}")
     print(f"  Stop / TP    : {cfg.stop_loss_pct:.0%} / "
           f"{(f'{cfg.take_profit_pct:.0%}' if cfg.take_profit_pct else 'off')}")
-    print(f"  Max hold     : {cfg.max_hold_bars} bars")
+    print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}")
     print(f"  Position     : ${cfg.position_size_usd}")
     print()
     print(f"  Trades       : {m['n_trades']}   (long={m['longs']} short={m['shorts']})")

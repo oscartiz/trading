@@ -37,7 +37,9 @@ class RegimeSwitchingConfig:
 
     # ---- entry ----
     # Take a long when P(bull) ≥ this; short when P(bear) ≥ this.
-    entry_proba: float = 0.65
+    # High threshold: only enter when the model is confident about the regime,
+    # which keeps trade count low and stop-loss hits near zero.
+    entry_proba: float = 0.85
     # Require regime expected return to clear this absolute log-return threshold
     # so we don't trade marginally-positive bull regimes. Per-bar units.
     min_expected_return_per_bar: float = 1e-4
@@ -47,12 +49,29 @@ class RegimeSwitchingConfig:
     # ---- exit ----
     # Exit if posterior of the held regime drops below this.
     exit_proba: float = 0.45
-    # Hard stop loss on adverse price move (fraction).
-    stop_loss_pct: float = 0.03
-    # Optional take profit (set to None to disable).
-    take_profit_pct: float | None = 0.06
-    # Max hold time regardless of regime (bars).
-    max_hold_bars: int = 240              # 10 days at 1h
+    # Hard stop loss on adverse price move (fraction). Wide on purpose —
+    # the strategy is designed to ride a regime to its end, so we want
+    # the regime change (not a price stop) to do the exiting.
+    stop_loss_pct: float = 0.12
+    # Take profit disabled by default — let the regime change be the exit
+    # signal so we don't cap winning trends.
+    take_profit_pct: float | None = None
+    # Max hold time regardless of regime (bars). 30 days at 1h candles.
+    max_hold_bars: int = 720
+    # Floor before regime-based exits can fire — stops still fire below this.
+    # Suppresses whipsaw when the smoothed posterior wobbles right after entry.
+    min_hold_bars: int = 72               # 3 days at 1h
+
+    # ---- regime persistence ----
+    # After exiting a regime, refuse to re-enter that same regime for N bars.
+    # Forces a cool-off before opening another trade in the same direction.
+    same_regime_cooldown_bars: int = 168   # 7 days at 1h
+    # "smoothed" — drive decisions from the posterior P(state | x).
+    # "viterbi" — drive decisions from the MAP state at the latest bar; this
+    # yields one trade per Viterbi run of bull/bear bars but is slower to
+    # react to early regime shifts. Smoothed lets us gate entries on a
+    # confidence threshold (entry_proba), which is the lever we tune.
+    signal_mode: str = "smoothed"
 
     # ---- sizing ----
     # Notional USD when fully sized.

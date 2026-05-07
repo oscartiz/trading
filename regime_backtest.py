@@ -80,6 +80,12 @@ def main() -> None:
     parser.add_argument("--take-profit", type=float, default=0.06,
                         help="Set to 0 to disable")
     parser.add_argument("--max-hold-bars", type=int, default=240)
+    parser.add_argument("--min-hold-bars", type=int, default=24,
+                        help="Floor before regime-based exits (stops still fire below this)")
+    parser.add_argument("--cooldown-bars", type=int, default=48,
+                        help="No re-entering the same regime for N bars after exit")
+    parser.add_argument("--signal-mode", choices=["smoothed", "viterbi"], default="viterbi",
+                        help="Drive entries from soft posterior or Viterbi MAP label")
 
     parser.add_argument("--size", type=float, default=100.0)
     parser.add_argument("--leverage", type=int, default=1)
@@ -107,6 +113,9 @@ def main() -> None:
         stop_loss_pct=args.stop_loss,
         take_profit_pct=(args.take_profit if args.take_profit > 0 else None),
         max_hold_bars=args.max_hold_bars,
+        min_hold_bars=args.min_hold_bars,
+        same_regime_cooldown_bars=args.cooldown_bars,
+        signal_mode=args.signal_mode,
         position_size_usd=args.size,
         leverage=args.leverage,
     )
