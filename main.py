@@ -6,8 +6,9 @@ import sys
 from loguru import logger
 
 from config import settings
-from execution import OrderManager, build_clients
+from execution import OrderManager, PaperOrderManager, build_clients
 from risk import RiskConfig, RiskManager
+from runtime import equity_watchdog, make_live_equity_source
 from strategies.configs import FundingConfig, RegimeSwitchingConfig
 from strategies.funding_rate import FundingRateStrategy
 from strategies.regime_switching import RegimeSwitchingStrategy
@@ -48,20 +49,38 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Run a trading strategy live.")
     parser.add_argument("--strategy", default="funding", choices=["funding", "regime"])
     parser.add_argument("--coin", default="BTC")
+    parser.add_argument("--paper", action="store_true",
+                        help="Paper-trade mode: real market data, simulated fills, no orders sent")
+    parser.add_argument("--paper-equity", type=float, default=1_000.0,
+                        help="Starting equity for paper mode")
     args = parser.parse_args()
 
-    logger.info("Starting | strategy={} coin={} testnet={}", args.strategy, args.coin, settings.testnet)
+    logger.info(
+        "Starting | strategy={} coin={} testnet={} paper={}",
+        args.strategy, args.coin, settings.testnet, args.paper,
+    )
 
-    info, exchange = build_clients()
-    order_manager = OrderManager(info, exchange)
+    info, exchange = build_clients(read_only=args.paper)
     risk = RiskManager(RiskConfig(
         max_position_usd=150.0,
         max_order_usd=100.0,
         max_drawdown_pct=0.05,
     ))
 
+    if args.paper:
+        order_manager = PaperOrderManager(info, starting_equity=args.paper_equity)
+        get_equity = order_manager.get_equity
+    else:
+        assert exchange is not None
+        order_manager = OrderManager(info, exchange)
+        get_equity = make_live_equity_source(info, settings.account_address)
+
     strategies = build_strategies(args.strategy, args.coin, order_manager, risk)
-    await asyncio.gather(*[s.run() for s in strategies])
+
+    await asyncio.gather(
+        *[s.run() for s in strategies],
+        equity_watchdog(get_equity, risk, poll_seconds=60.0),
+    )
 
 
 if __name__ == "__main__":

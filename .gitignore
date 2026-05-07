@@ -11,3 +11,4 @@ venv/
 research/*.ipynb_checkpoints/
 data/cache/
 logs/
+state/

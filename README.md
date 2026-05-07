@@ -141,16 +141,101 @@ INFO | BTC | funding=+0.01100%/hr (+96.4%/yr) mid=65210.00 in_position=True
 INFO | BTC | exiting | reasons: funding normalised (+0.00412%/hr)
 ```
 
+## Test-mode runbook
+
+For a multi-day shakeout before live capital, use one of:
+
+```bash
+# Paper mode on real mainnet data — simulated fills, no orders sent
+HL_TESTNET=false PYTHONPATH=. python main.py --strategy regime --coin BTC --paper --paper-equity 1000
+
+# Real orders on Hyperliquid testnet
+HL_TESTNET=true  PYTHONPATH=. python main.py --strategy regime --coin BTC
+```
+
+Paper mode does not require `HL_PRIVATE_KEY` — `build_clients(read_only=True)`
+skips the wallet entirely and only reads public market data.
+
+For a multi-day run, wrap the command so it survives the terminal closing:
+
+```bash
+# Option 1 — tmux (re-attachable)
+tmux new -s trading
+HL_TESTNET=false PYTHONPATH=. python main.py --strategy regime --coin BTC --paper --paper-equity 1000
+# Ctrl-B then D to detach; `tmux attach -t trading` to come back
+
+# Option 2 — nohup (fire-and-forget)
+HL_TESTNET=false PYTHONPATH=. nohup python main.py --strategy regime --coin BTC --paper --paper-equity 1000 &
+```
+
+Monitoring the run:
+
+```bash
+# Live tail of everything
+tail -f logs/trading.log
+
+# Just the events worth reacting to (entries, exits, refits, halts, errors)
+tail -f logs/trading.log | grep --line-buffered -E "entering|exiting|HMM refit|halt|Traceback|ERROR|restored|mismatch"
+
+# Snapshot of current strategy and risk state
+cat state/regime_switching_BTC.json
+cat state/risk_global.json
+
+# Is the process still alive?
+ps aux | grep "main.py --strategy" | grep -v grep
+```
+
+The regime strategy averages ~one trade per month and refits weekly, so the
+filtered tail is silent for hours at a time by design — that's the expected
+state, not a problem.
+
+What's running alongside the strategy:
+
+- **State persistence** (`state/{strategy}_{coin}.json`). Position flags, regime
+  streak counters, cooldown index, and last bar processed are written every
+  tick. Restart the bot any time — it picks up where it left off and replays
+  any bars that closed during downtime.
+- **Drawdown halt.** A watchdog polls account equity every 60s, tracks the
+  high-water mark, and halts new entries if drawdown breaches `max_drawdown_pct`
+  (default 5%). Existing positions still close via the strategy's normal exit
+  logic. The halt and HWM persist to `state/risk_global.json`, so a halted
+  bot stays halted across restarts — clear it explicitly with `reset_halt()`
+  or `rm state/risk_global.json`.
+- **Startup reconciliation.** On boot, the strategy compares persisted state
+  against the live exchange position. If they disagree (orphan position, side
+  mismatch, manual close while down), the strategy refuses new entries and
+  logs an ERROR — a loud sign to investigate before continuing.
+
+Recovering from a stuck state:
+
+```bash
+# Inspect persisted state
+cat state/regime_switching_BTC.json
+cat state/risk_global.json
+
+# Clear strategy state (e.g. after closing the position by hand on the UI)
+rm state/regime_switching_BTC.json
+
+# Clear a drawdown halt
+rm state/risk_global.json
+```
+
 ## Project structure
 
 ```
 trading/
 ├── config/           # env-based settings
 ├── data/             # async WebSocket feed (trades + L2 book)
-├── execution/        # Hyperliquid client, order manager
-├── risk/             # position limits, drawdown guard
+├── execution/
+│   ├── client.py             # Hyperliquid Info+Exchange clients
+│   ├── order_manager.py      # live order routing
+│   └── paper.py              # paper-trading order manager (--paper)
+├── risk/             # position limits, drawdown halt
+├── runtime/
+│   ├── state.py              # JSON-sidecar state persistence
+│   └── watchdog.py           # equity_watchdog + live equity source
 ├── strategies/
-│   ├── base.py               # abstract Strategy base class
+│   ├── base.py               # abstract Strategy + startup reconciliation
 │   ├── funding_rate.py       # funding rate carry strategy
 │   ├── regime_switching.py   # HMM-based 3-state regime strategy
 │   ├── regime.py             # 3-state classifier wrapping the HMM
@@ -169,8 +254,9 @@ trading/
 ├── tools/
 │   └── regime_sweep.py # parameter-sweep harness for the regime strategy
 ├── research/         # Jupyter notebooks
+├── state/            # runtime strategy state (gitignored)
 ├── tests/
-└── main.py           # entry point (--strategy funding|regime)
+└── main.py           # entry point (--strategy funding|regime [--paper])
 ```
 
 ## Writing a new strategy
@@ -194,11 +280,16 @@ Wire it up in `main.py` alongside the existing strategies.
 
 ## Risk management
 
-All orders pass through `RiskManager` before execution:
+All entry orders pass through `RiskManager.check_order` before execution:
 
-- Per-order USD cap
-- Max total position USD
-- Drawdown halt (shuts off trading if equity drops past threshold)
+- Per-order USD cap (`max_order_usd`)
+- Max total position USD (`max_position_usd`)
+- Open-order count cap (`max_open_orders`)
+- Drawdown halt — set by the equity watchdog when account drawdown ≥
+  `max_drawdown_pct`. Halt blocks new entries; existing positions still close.
+
+Exits do not go through `check_order`, so a halted strategy can still exit
+cleanly via stop-loss / regime-change / time-cap.
 
 Defaults in `main.py` — adjust to match your account size.
 

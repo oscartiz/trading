@@ -24,6 +24,7 @@ from loguru import logger
 
 from execution import OrderManager, Side
 from risk import RiskManager
+from runtime import StateStore
 
 from .base import Strategy
 from .configs import RegimeSwitchingConfig
@@ -37,6 +38,7 @@ class RegimeSwitchingStrategy(Strategy):
         order_manager: OrderManager,
         risk: RiskManager,
         config: RegimeSwitchingConfig | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
         super().__init__(coin, order_manager, risk)
         self.cfg = config or RegimeSwitchingConfig()
@@ -61,6 +63,9 @@ class RegimeSwitchingStrategy(Strategy):
         # Per-bar candidate streak (mirrors backtest engine logic).
         self._streak_target: Regime | None = None
         self._streak_bars: int = 0
+
+        self._state = state_store or StateStore(self.name(), coin)
+        self._load_state()
 
     def name(self) -> str:
         return "regime_switching"
@@ -104,16 +109,15 @@ class RegimeSwitchingStrategy(Strategy):
 
         for c in candles:
             self._closes.append(float(c["c"]))
-        self._last_bar_open_ms = int(candles[-1]["t"])
+        # Only initialise the bar-tracking cursor on a cold start. If we restored
+        # state from disk, _last_bar_open_ms is already set and _poll_new_bars
+        # will pick up any bars that closed while we were down.
+        if self._last_bar_open_ms is None:
+            self._last_bar_open_ms = int(candles[-1]["t"])
         self._refit()
 
     def _check_existing_position(self) -> None:
-        pos = self.orders.get_position(self.coin)
-        if pos and float(pos.get("szi", 0)) != 0:
-            logger.warning(
-                "{} | existing position on startup (szi={}) — strategy will not open new positions until flat",
-                self.coin, pos["szi"],
-            )
+        self._reconcile_with_exchange(self._in_position, self._position_side)
 
     # ------------------------------------------------------------------ #
     #  Per-bar logic                                                       #
@@ -153,6 +157,10 @@ class RegimeSwitchingStrategy(Strategy):
             await self._maybe_enter(snap, viterbi_label, mid)
         else:
             await self._maybe_exit(snap, viterbi_label, mid)
+
+        # Persist bar-advancing state (streak, bar_index, last_bar_open_ms) every tick
+        # so a restart preserves cooldown counters and confirmation streaks.
+        self._save_state()
 
     def _classify_now(self):
         returns = log_returns_from_close(np.fromiter(self._closes, dtype=np.float64))
@@ -208,6 +216,8 @@ class RegimeSwitchingStrategy(Strategy):
             self._streak_bars = 0
 
     async def _maybe_enter(self, snap, viterbi_label: Regime | None, mid: float) -> None:
+        if self._block_entries:
+            return
         target = self._candidate_target(snap, viterbi_label)
         if target is None:
             return
@@ -246,6 +256,7 @@ class RegimeSwitchingStrategy(Strategy):
             self._position_side = side
             self._target_regime = target
             self.risk.register_order()
+            self._save_state()
 
     async def _maybe_exit(self, snap, viterbi_label: Regime | None, mid: float) -> None:
         reasons: list[str] = []
@@ -307,6 +318,55 @@ class RegimeSwitchingStrategy(Strategy):
         self._target_regime = None
         self._position_side = None
         self.risk.release_order()
+        self._save_state()
+
+    # ------------------------------------------------------------------ #
+    #  State persistence                                                   #
+    # ------------------------------------------------------------------ #
+    def _save_state(self) -> None:
+        self._state.save({
+            "bar_index": self._bar_index,
+            "last_bar_open_ms": self._last_bar_open_ms,
+            "bars_since_fit": self._bars_since_fit,
+            "in_position": self._in_position,
+            "entry_price": self._entry_price,
+            "entry_bar_index": self._entry_bar_index,
+            "position_side": self._position_side.value if self._position_side else None,
+            "target_regime": int(self._target_regime) if self._target_regime is not None else None,
+            "last_exit_regime": int(self._last_exit_regime) if self._last_exit_regime is not None else None,
+            "last_exit_bar_index": self._last_exit_bar_index,
+            "streak_target": int(self._streak_target) if self._streak_target is not None else None,
+            "streak_bars": self._streak_bars,
+        })
+
+    def _load_state(self) -> None:
+        s = self._state.load()
+        if not s:
+            return
+        self._bar_index = int(s.get("bar_index", 0))
+        last_bar = s.get("last_bar_open_ms")
+        self._last_bar_open_ms = int(last_bar) if last_bar is not None else None
+        self._bars_since_fit = int(s.get("bars_since_fit", 0))
+        self._in_position = bool(s.get("in_position", False))
+        self._entry_price = s.get("entry_price")
+        self._entry_bar_index = int(s.get("entry_bar_index", 0))
+        side = s.get("position_side")
+        self._position_side = Side(side) if side else None
+        tgt = s.get("target_regime")
+        self._target_regime = Regime(int(tgt)) if tgt is not None else None
+        last_exit = s.get("last_exit_regime")
+        self._last_exit_regime = Regime(int(last_exit)) if last_exit is not None else None
+        self._last_exit_bar_index = int(s.get("last_exit_bar_index", -10**9))
+        streak = s.get("streak_target")
+        self._streak_target = Regime(int(streak)) if streak is not None else None
+        self._streak_bars = int(s.get("streak_bars", 0))
+        if self._in_position:
+            logger.info(
+                "{} | restored state | side={} regime={} entry={} bar_index={}",
+                self.coin, self._position_side,
+                self._target_regime.label if self._target_regime else None,
+                self._entry_price, self._bar_index,
+            )
 
     # ------------------------------------------------------------------ #
     #  Market data                                                         #

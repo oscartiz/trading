@@ -5,6 +5,7 @@ from loguru import logger
 
 from execution import OrderManager, Side
 from risk import RiskManager
+from runtime import StateStore
 from .base import Strategy
 from .configs import FundingConfig
 
@@ -17,13 +18,16 @@ class FundingRateStrategy(Strategy):
     """
 
     def __init__(self, coin: str, order_manager: OrderManager, risk: RiskManager,
-                 config: FundingConfig | None = None) -> None:
+                 config: FundingConfig | None = None,
+                 state_store: StateStore | None = None) -> None:
         super().__init__(coin, order_manager, risk)
         self.cfg = config or FundingConfig()
         self._in_position = False
         self._entry_price: float | None = None
         self._entry_time: datetime | None = None
         self._position_side: Side | None = None
+        self._state = state_store or StateStore(self.name(), coin)
+        self._load_state()
 
     def name(self) -> str:
         return "funding_rate"
@@ -71,12 +75,7 @@ class FundingRateStrategy(Strategy):
         return None
 
     def _check_existing_position(self) -> None:
-        pos = self.orders.get_position(self.coin)
-        if pos and float(pos.get("szi", 0)) != 0:
-            logger.warning(
-                "{} | open position detected on startup (szi={}) — strategy will monitor but not enter until closed",
-                self.coin, pos["szi"],
-            )
+        self._reconcile_with_exchange(self._in_position, self._position_side)
 
     async def _tick(self) -> None:
         funding = self._get_funding_rate()
@@ -98,6 +97,8 @@ class FundingRateStrategy(Strategy):
             await self._check_exit(funding, mid)
 
     async def _check_entry(self, funding: float, mid: float) -> None:
+        if self._block_entries:
+            return
         if abs(funding) < self.cfg.entry_threshold:
             return
 
@@ -120,6 +121,7 @@ class FundingRateStrategy(Strategy):
             self._entry_time = datetime.now(timezone.utc)
             self._position_side = side
             self.risk.register_order()
+            self._save_state()
 
     async def _check_exit(self, funding: float, mid: float) -> None:
         reasons: list[str] = []
@@ -175,3 +177,31 @@ class FundingRateStrategy(Strategy):
         self._entry_time = None
         self._position_side = None
         self.risk.release_order()
+        self._save_state()
+
+    # ------------------------------------------------------------------ #
+    #  State persistence                                                   #
+    # ------------------------------------------------------------------ #
+    def _save_state(self) -> None:
+        self._state.save({
+            "in_position": self._in_position,
+            "entry_price": self._entry_price,
+            "entry_time_iso": self._entry_time.isoformat() if self._entry_time else None,
+            "position_side": self._position_side.value if self._position_side else None,
+        })
+
+    def _load_state(self) -> None:
+        s = self._state.load()
+        if not s:
+            return
+        self._in_position = bool(s.get("in_position", False))
+        self._entry_price = s.get("entry_price")
+        ts = s.get("entry_time_iso")
+        self._entry_time = datetime.fromisoformat(ts) if ts else None
+        side = s.get("position_side")
+        self._position_side = Side(side) if side else None
+        if self._in_position:
+            logger.info(
+                "{} | restored state | side={} entry={} since={}",
+                self.coin, self._position_side, self._entry_price, self._entry_time,
+            )
