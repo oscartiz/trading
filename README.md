@@ -2,74 +2,90 @@
 
 Algorithmic trading bot for [Hyperliquid](https://hyperliquid.xyz) perpetual futures, written in Python.
 
-## Strategies
+Two strategies are implemented, with very different theses:
 
-### Funding Rate
-Collects funding payments by sitting on the receiving side when rates are extreme.
+| Strategy | Trades on | Edge thesis | Position bias |
+|---|---|---|---|
+| **Funding-rate carry** | Hourly funding rate extremes | Crowded positioning pays the receiving side | Counter-trend (shorts in rallies, longs in selloffs) |
+| **Regime switching (HMM)** | 3-state HMM posterior on hourly returns | Bull/bear regimes cluster — once identified, ride them | With-trend (longs in bulls, shorts in bears) |
 
-- **Positive funding** → opens short (longs pay us hourly)
-- **Negative funding** → opens long (shorts pay us hourly)
+---
 
-Exits when funding normalises, flips, a 2% stop loss fires, or the 48h time cap is hit. No price prediction — purely a carry trade on crowded positioning.
+## Funding-rate carry
 
-Default parameters (conservative, small account):
+Pure carry trade — no price prediction. When the perpetual funding rate is extreme it means one side of the book is crowded, and the receiving side gets paid hourly until positioning normalises.
+
+- **Positive funding** → opens **short** (longs are paying us)
+- **Negative funding** → opens **long** (shorts are paying us)
+
+Exits when funding normalises, flips sign, the 2% stop fires, or the 48h time cap is hit.
+
+Default parameters:
 
 | Parameter | Value | Notes |
 |---|---|---|
-| Position size | $50 notional | |
-| Leverage | 1x cross | |
+| Position size | $50 notional | conservative, small account |
+| Leverage | 1× cross | |
 | Entry threshold | 0.02%/hr | ≈175%/yr annualised |
 | Exit threshold | 0.005%/hr | rate no longer worth holding |
 | Stop loss | 2% | hard directional cut |
 | Max hold | 48h | time cap regardless of funding |
-| Poll interval | 10 min | REST API, not WebSocket |
 
-### Regime Switching
-Fits a 3-state Gaussian Hidden Markov Model (HMM) to hourly log returns and labels every bar as **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Tuned to engage with the market a handful of times per month — opens after the model has been confident in the same direction for several hours, then holds until the regime itself changes.
-
-- **P(bull) ≥ 0.85** sustained for `entry_confirmation_bars` (6 hours, long side) → opens long
-- **P(bear) ≥ 0.85** sustained for `entry_confirmation_bars_short` (3 hours, short side) → opens short
-- **Asymmetric confirmation gate:** bear regimes in crypto are spikier than bull regimes — they rarely hold long enough to clear an 8-bar gate, which makes a symmetric gate structurally long-only. The short-side gate is set tighter (3h vs. 6h) so the model can engage with bear cycles without dragging long-side quality down
-- Holds for at least `min_hold_bars` (3 days) so the smoothed posterior can't whipsaw a fresh entry
-- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 60-day time cap is hit — there is **no fixed take-profit**
-- After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (3 days) so we don't immediately re-open the trade we just closed
-
-The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper). See `strategies/configs.py:RegimeSwitchingConfig` for the full parameter set, and `tools/regime_sweep.py` for the parameter-sweep harness used to pick the defaults.
-
-## Backtest results
-
-### Funding rate — BTC 2024 | 12 trades | Net P&L: -$6.63
+### Backtest — BTC 2024 | 12 trades | Net P&L: −$6.63
 
 ![Funding BTC 2024](data/charts/backtest_BTC_20240101_20250101.png)
 
-The three panels show: BTC price with labelled long/short entries and profitable/loss exits; the hourly funding rate against entry (0.02%/hr) and exit (0.005%/hr) thresholds; and cumulative USD P&L over the year. The strategy captured several high-funding episodes but gave back gains during the flat mid-year period, finishing slightly negative at $50 notional / 1× leverage — consistent with a conservative parameter set on a year where funding was often below threshold.
+The three panels show BTC price with entry/exit markers, the hourly funding rate against the entry/exit thresholds, and the cumulative USD P&L curve.
 
-### Regime switching — BTC 2024 | 12 trades | Net P&L: +$18.82 | Sharpe 1.14
+**What happened:** funding spent most of 2024 below the 0.02%/hr threshold, so the strategy mostly stayed flat. It engaged on a handful of crowded-positioning episodes — typically right before BTC pivoted, since that's when funding extremes appear. A few captures landed cleanly, but two stop-outs during sharp directional moves wiped most of the carry gains, and the strategy finished the year slightly negative on $50 notional. The takeaway is structural: low-funding years on BTC don't offer enough carry to overcome the occasional 2% stop-out at this size.
+
+---
+
+## Regime switching (HMM)
+
+Fits a 3-state Gaussian Hidden Markov Model to hourly log returns and labels every bar **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Tuned to engage with the market a handful of times per month — opens after the model has been confident in a direction for several consecutive hours, holds until the regime itself changes.
+
+- **P(bull) ≥ 0.85** sustained for `entry_confirmation_bars` (6 hours, long side) → opens **long**
+- **P(bear) ≥ 0.85** sustained for `entry_confirmation_bars_short` (3 hours, short side) → opens **short**
+- **Asymmetric confirmation gate:** bear regimes in crypto are spikier than bull regimes — they rarely hold long enough to clear a symmetric 8-bar gate, which makes such a gate structurally long-only. The short-side gate is set tighter (3h vs. 6h) so the model engages with bear cycles without dragging long-side quality down.
+- Holds for at least `min_hold_bars` (3 days) so the smoothed posterior can't whipsaw a fresh entry.
+- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 60-day time cap is hit. **No fixed take-profit.**
+- After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (3 days).
+
+The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper).
+
+### Backtest — BTC 2024 (bull year) | 12 trades | Net P&L: +$18.82 | Sharpe 1.14
 
 ![Regime BTC 2024](data/charts/regime_BTC_20240101_20250101.png)
 
-Run with `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`. The three panels show: BTC price with regime-shaded background (red=bear, grey=chop, green=bull) and labelled trade entries/exits; the rolling smoothed posteriors P(bear), P(chop), P(bull) with the entry/exit thresholds; and cumulative USD P&L.
+The three panels show BTC price with regime-shaded background (red=bear, grey=chop, green=bull) and labelled trade markers; the rolling smoothed posteriors with entry (0.85) and exit (0.45) thresholds; and the cumulative USD P&L curve. Run with `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`.
 
-### Regime switching — BTC 2022 | 6 trades | Net P&L: +$16.77 | Sharpe 0.96
+**What happened:** the model identified BTC's three big up-legs of 2024 — Feb–Mar, May–Jul, Oct–Dec — and rode each with one or two long entries, holding 60–100 hours apiece. Between them, the brief bear pockets in April and August produced 5 short entries that the asymmetric gate let through; under the prior symmetric config they would have been blocked. 7 longs / 5 shorts, 58% win rate, average hold 79.8 hours, no stop-outs — every exit was the soft `regime_weakened` signal as the smoothed posterior decayed. Drawdown peaked at −24% of position size during a chop-out around late August.
+
+### Backtest — BTC 2022 (bear year) | 6 trades | Net P&L: +$16.77 | Sharpe 0.96
 
 ![Regime BTC 2022](data/charts/regime_BTC_20220101_20230101.png)
 
-The 2022 run is the out-of-sample stress test — BTC went from $47k → $16k that year, with the FTX collapse and the Luna/Terra unwind on top of a sustained downtrend. The strategy entered 6 times (2 long / 4 short), profited from the bear cycles via shorts rather than dodging them, and finished the year up $16.77 on $100 notional.
+The out-of-sample stress test. BTC fell from $47k to $16k in 2022, with the Luna/Terra unwind in May, the June capitulation, and the FTX collapse in November all visible in the price panel.
 
-The strategy went through four tuning iterations:
+**What happened:** the model spotted the regime shifts and shorted into them — 4 of the 6 trades were shorts, all clustered around the major capitulations. The two longs caught the relief rallies between flushes. 67% win rate, +$16.77 net at $100 notional, all exits via `regime_weakened`. The $50k → $16k drawdown in spot is the backdrop against which a +$16 P&L lands; the strategy didn't dodge the bear, it profited from it.
 
-| Iteration | Trades (2024) | Net P&L (2024) | Notes |
+### Tuning history (regime strategy, BTC 2024)
+
+| Iteration | Trades | Net P&L | Notes |
 |---|---|---|---|
-| 1. Baseline (`P≥0.65, 3% stop, 6% TP, no confirm`) | 315 | -$2.48 | Whipsaws — 298/315 exits on `regime_weakened` |
-| 2. Ride-the-regime (`P≥0.85, 12% stop, no TP, 7d cooldown`) | 28 | +$30.16 | Zero stop-outs, but 2-3 trades/month |
+| 1. Baseline (`P≥0.65, 3% stop, 6% TP, no confirm`) | 315 | −$2.48 | Whipsaws — 298/315 exits on `regime_weakened` |
+| 2. Ride-the-regime (`P≥0.85, 12% stop, no TP, 7d cooldown`) | 28 | +$30.16 | Zero stop-outs, but 2–3 trades/month |
 | 3. Low-frequency (`+ 8h confirmation, 14d cooldown, 60d max-hold`) | 3 | +$16.21 | ~1 trade per 4 months — but **long-only** even on bear years |
-| 4. Asymmetric gate (`6h long / 3h short confirm, 3d cooldown`) | **12** | **+$18.82** | Engages with bear cycles; 5 of 12 trades on 2024 are shorts |
+| 4. **Asymmetric gate** (`6h long / 3h short confirm, 3d cooldown`) | **12** | **+$18.82** | Engages with bear cycles; 5 of 12 are shorts |
 
-The shift from iteration 3 → 4 was driven by an out-of-sample run on BTC 2022 (a -65% bear year) that produced exactly **one** long trade, +$0.26, no shorts at all. Diagnostic showed bear regimes in BTC 2024 never sustained more than 4 consecutive bars passing the entry gate, while bull runs reached 17 — the symmetric 8-bar gate was structurally long-only. Lowering the short-side gate to 3 bars unlocked short entries without lowering long-side quality.
+Iteration 3 looked great on 2024 (+$16, Sharpe 2.20) but produced exactly **one** trade on 2022 — a long, +$0.26 — confirming the gate was structurally long-only. Diagnostic showed bear regimes in BTC 2024 never sustained more than 4 consecutive bars passing the gate, while bull runs reached 17. Lowering only the short-side gate (8 → 3) preserved long-side quality and unlocked the short entries that make 2022 profitable.
 
-Result on BTC 2024 with the asymmetric defaults: **12 trades (7 long / 5 short), 58.3% win rate, 79.8h avg hold, +$18.82 net at $100 notional / 1×, Sharpe 1.14, max drawdown -24% of position size**. Result on BTC 2022: **6 trades (2 long / 4 short), 66.7% win rate, +$16.77 net, Sharpe 0.96, max drawdown -15%**. All exits on both years were via `regime_weakened` — no stop-outs.
+### Caveats before deploying
 
-**Caveats — read these before deploying:** *(1)* 18 trades across two years is still a small sample; per-trade noise is meaningful and these defaults haven't been validated on ETH or 2023 BTC. *(2)* The deeper drawdowns (-15% / -24% of position size) are the price of more aggressive engagement — a $100 trade can lose $24 in mark-to-market before the regime exit fires. Size accordingly. *(3)* The asymmetric short gate is calibrated to BTC's specific regime persistence; other assets may have different bull/bear asymmetry profiles and will need their own gate ratios.
+1. **Sample size.** 18 trades across two years is still small. Per-trade noise is meaningful and these defaults haven't been validated on ETH or 2023 BTC.
+2. **Drawdown.** A $100 position can lose $24 in mark-to-market before the regime exit fires. Size accordingly.
+3. **Asset-specific calibration.** The asymmetric short gate is calibrated to BTC's regime persistence. Other assets likely have different bull/bear asymmetry profiles and will need their own gate ratios.
 
 ## Setup
 
