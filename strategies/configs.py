@@ -67,11 +67,16 @@ class RegimeSwitchingConfig:
     # ---- regime persistence ----
     # After exiting a regime, refuse to re-enter that same regime for N bars.
     # Forces a cool-off before opening another trade in the same direction.
-    same_regime_cooldown_bars: int = 336   # 14 days at 1h
+    same_regime_cooldown_bars: int = 72   # 3 days at 1h
     # Require the candidate target regime to have been the (smoothed-posterior or
     # viterbi) entry signal for this many *consecutive* bars before opening.
-    # Filters out posterior spikes that revert. 8h sustained signal at 1h candles.
-    entry_confirmation_bars: int = 8
+    # Filters out posterior spikes that revert. Acts as the long-side gate.
+    entry_confirmation_bars: int = 6
+    # Optional override for the short side. If None, shorts inherit
+    # `entry_confirmation_bars`. Bear regimes are spikier than bull regimes in
+    # crypto — they rarely sustain long enough to clear the long-side gate, so
+    # a smaller value here unlocks short entries without lowering long quality.
+    entry_confirmation_bars_short: int | None = 3
     # "smoothed" — drive decisions from the posterior P(state | x).
     # "viterbi" — drive decisions from the MAP state at the latest bar; this
     # yields one trade per Viterbi run of bull/bear bars but is slower to

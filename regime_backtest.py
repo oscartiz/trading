@@ -83,10 +83,12 @@ def main() -> None:
     parser.add_argument("--max-hold-bars", type=int, default=1440)
     parser.add_argument("--min-hold-bars", type=int, default=72,
                         help="Floor before regime-based exits (stops still fire below this)")
-    parser.add_argument("--cooldown-bars", type=int, default=336,
+    parser.add_argument("--cooldown-bars", type=int, default=72,
                         help="No re-entering the same regime for N bars after exit")
-    parser.add_argument("--confirmation-bars", type=int, default=8,
-                        help="Require the candidate regime for N consecutive bars before entry")
+    parser.add_argument("--confirmation-bars", type=int, default=6,
+                        help="Long-side: require the candidate regime for N consecutive bars before entry")
+    parser.add_argument("--confirmation-bars-short", type=int, default=3,
+                        help="Short-side override (defaults to 3; bear regimes are spikier than bull)")
     parser.add_argument("--signal-mode", choices=["smoothed", "viterbi"], default="smoothed",
                         help="Drive entries from soft posterior or Viterbi MAP label")
 
@@ -119,6 +121,7 @@ def main() -> None:
         min_hold_bars=args.min_hold_bars,
         same_regime_cooldown_bars=args.cooldown_bars,
         entry_confirmation_bars=args.confirmation_bars,
+        entry_confirmation_bars_short=args.confirmation_bars_short,
         signal_mode=args.signal_mode,
         position_size_usd=args.size,
         leverage=args.leverage,

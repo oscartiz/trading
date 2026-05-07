@@ -187,7 +187,8 @@ def test_regime_enters_long_on_high_p_bull_smoothed():
 
 def test_regime_enters_short_on_high_p_bear_smoothed():
     strat, _om = _make_regime(cfg_overrides={
-        "signal_mode": "smoothed", "entry_proba": 0.65, "entry_confirmation_bars": 0,
+        "signal_mode": "smoothed", "entry_proba": 0.65,
+        "entry_confirmation_bars": 0, "entry_confirmation_bars_short": 0,
     })
     snap = _snap(0.85, 0.10, 0.05, er=-0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
@@ -246,6 +247,7 @@ def test_regime_cooldown_does_not_block_opposite_regime():
         "entry_proba": 0.65,
         "same_regime_cooldown_bars": 50,
         "entry_confirmation_bars": 0,
+        "entry_confirmation_bars_short": 0,
     })
     strat._last_exit_regime = Regime.BULL
     strat._last_exit_bar_index = 100

@@ -73,11 +73,16 @@ class RegimeSwitchingStrategy(Strategy):
         self._check_existing_position()
         await self._warm_up()
 
+        short_conf = (self.cfg.entry_confirmation_bars_short
+                      if self.cfg.entry_confirmation_bars_short is not None
+                      else self.cfg.entry_confirmation_bars)
         logger.info(
             "{} | {} started | window={} bars refit_every={} entry_p≥{:.2f} exit_p<{:.2f} "
-            "stop={:.0%} tp={} max_hold={}b size=${}",
+            "confirm_long={} confirm_short={} cooldown={} stop={:.0%} tp={} max_hold={}b size=${}",
             self.name(), self.coin, self.cfg.train_window_bars, self.cfg.refit_every_bars,
-            self.cfg.entry_proba, self.cfg.exit_proba, self.cfg.stop_loss_pct,
+            self.cfg.entry_proba, self.cfg.exit_proba,
+            self.cfg.entry_confirmation_bars, short_conf, self.cfg.same_regime_cooldown_bars,
+            self.cfg.stop_loss_pct,
             f"{self.cfg.take_profit_pct:.0%}" if self.cfg.take_profit_pct else "off",
             self.cfg.max_hold_bars, self.cfg.position_size_usd,
         )
@@ -208,7 +213,11 @@ class RegimeSwitchingStrategy(Strategy):
             return
 
         # Confirmation: candidate must have been consistent for ≥ N bars.
-        if self._streak_bars < self.cfg.entry_confirmation_bars:
+        # Short side may use a smaller gate (bear regimes are spikier than bull).
+        required = self.cfg.entry_confirmation_bars
+        if target == Regime.BEAR and self.cfg.entry_confirmation_bars_short is not None:
+            required = self.cfg.entry_confirmation_bars_short
+        if self._streak_bars < required:
             return
 
         # Same-regime cooldown after a recent exit.

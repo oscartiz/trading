@@ -235,8 +235,13 @@ def run_regime_backtest(
             target: Regime | None = candidate
 
             # Confirmation: target must have been the candidate for ≥ N consecutive bars.
-            if target is not None and streak_bars < cfg.entry_confirmation_bars:
-                target = None
+            # Short side may use a smaller gate than long.
+            if target is not None:
+                required = cfg.entry_confirmation_bars
+                if target == Regime.BEAR and cfg.entry_confirmation_bars_short is not None:
+                    required = cfg.entry_confirmation_bars_short
+                if streak_bars < required:
+                    target = None
 
             # Same-regime cooldown: don't re-enter the regime we just exited.
             if (target is not None
@@ -361,7 +366,10 @@ def print_regime_metrics(result: RegimeBacktestResult) -> None:
     print(f"  Entry P      : ≥{cfg.entry_proba:.2f}    Exit P: <{cfg.exit_proba:.2f}")
     print(f"  Stop / TP    : {cfg.stop_loss_pct:.0%} / "
           f"{(f'{cfg.take_profit_pct:.0%}' if cfg.take_profit_pct else 'off')}")
-    print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}  confirm={cfg.entry_confirmation_bars}")
+    short_conf = (cfg.entry_confirmation_bars_short
+                  if cfg.entry_confirmation_bars_short is not None
+                  else cfg.entry_confirmation_bars)
+    print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}  confirm={cfg.entry_confirmation_bars}/{short_conf} (long/short)")
     print(f"  Position     : ${cfg.position_size_usd}")
     print()
     print(f"  Trades       : {m['n_trades']}   (long={m['longs']} short={m['shorts']})")

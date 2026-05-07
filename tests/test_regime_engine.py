@@ -110,6 +110,7 @@ def _base_cfg(**overrides) -> RegimeSwitchingConfig:
         min_hold_bars=0,
         same_regime_cooldown_bars=0,
         entry_confirmation_bars=0,
+        entry_confirmation_bars_short=0,
         signal_mode="smoothed",
         position_size_usd=100.0,
     )
@@ -403,7 +404,7 @@ def test_entry_confirmation_streak_resets_on_regime_flip():
     # 3 bars bull, 1 bar bear (resets), 3 bars bull (only 3 → not enough for confirm=5).
     loop = [bull] * 3 + [bear] + [bull] * 3 + [chop] * 13
     cfg = _base_cfg(min_hold_bars=0, entry_confirmation_bars=5,
-                    same_regime_cooldown_bars=0)
+                    entry_confirmation_bars_short=5, same_regime_cooldown_bars=0)
 
     with _patch_classifier(StubClassifier(loop)):
         result = run_regime_backtest(prices, "BTC", cfg, fee_rate=0.0)
