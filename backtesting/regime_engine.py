@@ -109,6 +109,10 @@ def run_regime_backtest(
     n_refits = 0
     last_exit_regime: Regime | None = None
     last_exit_idx: int = -10**9
+    # Tracks how many consecutive bars the same regime has been the entry
+    # candidate. Resets when the candidate flips or disappears.
+    streak_target: Regime | None = None
+    streak_bars: int = 0
 
     # Initial fit on the first window
     init_returns = log_returns_from_close(closes[: cfg.train_window_bars + 1])
@@ -202,20 +206,37 @@ def run_regime_backtest(
                 last_exit_idx = t
 
         # ---- entry handling (new entries are gated on the same bar after exits) ----
+        # First compute the candidate target ignoring streak/cooldown so we can
+        # update the per-bar streak counter even when we're already in position.
+        candidate: Regime | None = None
+        if cfg.signal_mode == "viterbi":
+            if viterbi_label == Regime.BULL and snap.expected_return >= cfg.min_expected_return_per_bar:
+                candidate = Regime.BULL
+            elif viterbi_label == Regime.BEAR and snap.expected_return <= -cfg.min_expected_return_per_bar:
+                candidate = Regime.BEAR
+        elif snap.proba[1] <= cfg.max_chop_proba:
+            if (snap.proba[2] >= cfg.entry_proba
+                    and snap.expected_return >= cfg.min_expected_return_per_bar):
+                candidate = Regime.BULL
+            elif (snap.proba[0] >= cfg.entry_proba
+                    and snap.expected_return <= -cfg.min_expected_return_per_bar):
+                candidate = Regime.BEAR
+
+        if candidate is not None and candidate == streak_target:
+            streak_bars += 1
+        elif candidate is not None:
+            streak_target = candidate
+            streak_bars = 1
+        else:
+            streak_target = None
+            streak_bars = 0
+
         if not in_position:
-            target: Regime | None = None
-            if cfg.signal_mode == "viterbi":
-                if viterbi_label == Regime.BULL and snap.expected_return >= cfg.min_expected_return_per_bar:
-                    target = Regime.BULL
-                elif viterbi_label == Regime.BEAR and snap.expected_return <= -cfg.min_expected_return_per_bar:
-                    target = Regime.BEAR
-            elif snap.proba[1] <= cfg.max_chop_proba:
-                if (snap.proba[2] >= cfg.entry_proba
-                        and snap.expected_return >= cfg.min_expected_return_per_bar):
-                    target = Regime.BULL
-                elif (snap.proba[0] >= cfg.entry_proba
-                        and snap.expected_return <= -cfg.min_expected_return_per_bar):
-                    target = Regime.BEAR
+            target: Regime | None = candidate
+
+            # Confirmation: target must have been the candidate for ≥ N consecutive bars.
+            if target is not None and streak_bars < cfg.entry_confirmation_bars:
+                target = None
 
             # Same-regime cooldown: don't re-enter the regime we just exited.
             if (target is not None
@@ -340,7 +361,7 @@ def print_regime_metrics(result: RegimeBacktestResult) -> None:
     print(f"  Entry P      : ≥{cfg.entry_proba:.2f}    Exit P: <{cfg.exit_proba:.2f}")
     print(f"  Stop / TP    : {cfg.stop_loss_pct:.0%} / "
           f"{(f'{cfg.take_profit_pct:.0%}' if cfg.take_profit_pct else 'off')}")
-    print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}")
+    print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}  confirm={cfg.entry_confirmation_bars}")
     print(f"  Position     : ${cfg.position_size_usd}")
     print()
     print(f"  Trades       : {m['n_trades']}   (long={m['longs']} short={m['shorts']})")

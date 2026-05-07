@@ -51,6 +51,7 @@ def _make_strategy(
         signal_mode="smoothed",
         min_hold_bars=0,
         same_regime_cooldown_bars=0,
+        entry_confirmation_bars=0,
         position_size_usd=100.0,
         stop_loss_pct=0.10,
         take_profit_pct=None,

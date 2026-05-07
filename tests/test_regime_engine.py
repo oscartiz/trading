@@ -92,7 +92,11 @@ def _patch_classifier(classifier):
 
 
 def _base_cfg(**overrides) -> RegimeSwitchingConfig:
-    """Tight defaults for fast deterministic tests."""
+    """Tight defaults for fast deterministic tests.
+
+    Explicitly pins every gate to its permissive value so tests don't
+    silently break when production defaults shift.
+    """
     base = dict(
         train_window_bars=30,
         refit_every_bars=10000,         # effectively never refit during a short test
@@ -105,6 +109,7 @@ def _base_cfg(**overrides) -> RegimeSwitchingConfig:
         max_hold_bars=10000,
         min_hold_bars=0,
         same_regime_cooldown_bars=0,
+        entry_confirmation_bars=0,
         signal_mode="smoothed",
         position_size_usd=100.0,
     )
@@ -356,6 +361,57 @@ def test_viterbi_mode_uses_label_not_proba():
 
     assert len(result.trades) == 1
     assert result.trades[0].side == "long"
+
+
+def test_entry_confirmation_blocks_brief_posterior_spike():
+    """A 2-bar bull spike must not trigger entry when entry_confirmation_bars=5."""
+    prices = build_prices([100.0] * 50)
+    bull = make_snap(0.05, 0.10, 0.85, expected_return=0.001)
+    chop = make_snap(0.10, 0.80, 0.10)
+    # Two bars of bull, then chop — confirmation requires 5, so no entry should fire.
+    loop = [bull, bull] + [chop] * 18
+    cfg = _base_cfg(min_hold_bars=0, entry_confirmation_bars=5)
+
+    with _patch_classifier(StubClassifier(loop)):
+        result = run_regime_backtest(prices, "BTC", cfg, fee_rate=0.0)
+
+    assert len(result.trades) == 0
+
+
+def test_entry_confirmation_allows_sustained_signal():
+    """A sustained bull regime past entry_confirmation_bars must enter on bar N."""
+    prices = build_prices([100.0] * 50)
+    bull = make_snap(0.05, 0.10, 0.85, expected_return=0.001)
+    chop = make_snap(0.10, 0.80, 0.10)
+    # 6 bars of bull (enough for confirmation=5), then chop forces exit.
+    loop = [bull] * 6 + [chop] * 14
+    cfg = _base_cfg(min_hold_bars=0, entry_confirmation_bars=5)
+
+    with _patch_classifier(StubClassifier(loop)):
+        result = run_regime_backtest(prices, "BTC", cfg, fee_rate=0.0)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].side == "long"
+
+
+def test_entry_confirmation_streak_resets_on_regime_flip():
+    """A bull→bear→bull sequence must restart the streak counter."""
+    prices = build_prices([100.0] * 50)
+    bull = make_snap(0.05, 0.10, 0.85, expected_return=0.001)
+    bear = make_snap(0.85, 0.10, 0.05, expected_return=-0.001)
+    chop = make_snap(0.10, 0.80, 0.10)
+    # 3 bars bull, 1 bar bear (resets), 3 bars bull (only 3 → not enough for confirm=5).
+    loop = [bull] * 3 + [bear] + [bull] * 3 + [chop] * 13
+    cfg = _base_cfg(min_hold_bars=0, entry_confirmation_bars=5,
+                    same_regime_cooldown_bars=0)
+
+    with _patch_classifier(StubClassifier(loop)):
+        result = run_regime_backtest(prices, "BTC", cfg, fee_rate=0.0)
+
+    # Bear at bar 3 has expected_return=-0.001 ≤ -min_er=0, so a bear entry
+    # would qualify (1-bar streak); but confirmation=5 blocks it. The 3 trailing
+    # bull bars also fail confirmation. → 0 trades.
+    assert len(result.trades) == 0
 
 
 def test_smoothed_mode_does_not_call_predict():

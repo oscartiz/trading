@@ -173,6 +173,7 @@ def test_regime_enters_long_on_high_p_bull_smoothed():
         "entry_proba": 0.65,
         "min_expected_return_per_bar": 0.0,
         "max_chop_proba": 0.5,
+        "entry_confirmation_bars": 0,
     })
     snap = _snap(0.05, 0.10, 0.85, er=0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
@@ -185,7 +186,9 @@ def test_regime_enters_long_on_high_p_bull_smoothed():
 
 
 def test_regime_enters_short_on_high_p_bear_smoothed():
-    strat, _om = _make_regime(cfg_overrides={"signal_mode": "smoothed", "entry_proba": 0.65})
+    strat, _om = _make_regime(cfg_overrides={
+        "signal_mode": "smoothed", "entry_proba": 0.65, "entry_confirmation_bars": 0,
+    })
     snap = _snap(0.85, 0.10, 0.05, er=-0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
     assert strat._in_position is True
@@ -198,8 +201,8 @@ def test_regime_blocks_entry_when_chop_dominant_smoothed():
         "signal_mode": "smoothed",
         "entry_proba": 0.30,
         "max_chop_proba": 0.50,
+        "entry_confirmation_bars": 0,
     })
-    # P(bull) > entry_proba but P(chop) > max_chop_proba.
     snap = _snap(0.10, 0.55, 0.35, er=0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
     assert strat._in_position is False
@@ -212,6 +215,7 @@ def test_regime_viterbi_enters_on_label_below_proba_threshold():
         "signal_mode": "viterbi",
         "entry_proba": 0.85,
         "min_expected_return_per_bar": 0.0,
+        "entry_confirmation_bars": 0,
     })
     snap = _snap(0.30, 0.20, 0.50, er=0.001)
     _run(strat._maybe_enter(snap, Regime.BULL, 100.0))
@@ -224,11 +228,11 @@ def test_regime_cooldown_blocks_same_regime_reentry():
         "signal_mode": "smoothed",
         "entry_proba": 0.65,
         "same_regime_cooldown_bars": 50,
+        "entry_confirmation_bars": 0,
     })
-    # Pretend we just exited a bull trade.
     strat._last_exit_regime = Regime.BULL
     strat._last_exit_bar_index = 100
-    strat._bar_index = 110   # only 10 bars elapsed, cooldown=50 still active
+    strat._bar_index = 110
 
     snap = _snap(0.05, 0.10, 0.85, er=0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
@@ -241,12 +245,12 @@ def test_regime_cooldown_does_not_block_opposite_regime():
         "signal_mode": "smoothed",
         "entry_proba": 0.65,
         "same_regime_cooldown_bars": 50,
+        "entry_confirmation_bars": 0,
     })
     strat._last_exit_regime = Regime.BULL
     strat._last_exit_bar_index = 100
     strat._bar_index = 110
 
-    # Strong bear after a recent bull exit — should be allowed.
     snap = _snap(0.85, 0.10, 0.05, er=-0.001)
     _run(strat._maybe_enter(snap, None, 100.0))
     assert strat._in_position is True
@@ -326,6 +330,65 @@ def test_regime_viterbi_exit_on_label_flip():
     snap = _snap(0.20, 0.60, 0.20)   # any soft posterior
     _run(strat._maybe_exit(snap, Regime.CHOP, 100.0))  # Viterbi flipped to CHOP
     assert strat._in_position is False
+
+
+def test_regime_confirmation_bars_blocks_premature_entry():
+    """Streak < entry_confirmation_bars must suppress entry."""
+    strat, om = _make_regime(cfg_overrides={
+        "signal_mode": "smoothed",
+        "entry_proba": 0.65,
+        "entry_confirmation_bars": 5,
+    })
+    # Only 2 bars of streak — below the 5-bar requirement.
+    strat._streak_target = Regime.BULL
+    strat._streak_bars = 2
+
+    snap = _snap(0.05, 0.10, 0.85, er=0.001)
+    _run(strat._maybe_enter(snap, None, 100.0))
+    assert strat._in_position is False
+    assert om.orders == []
+
+
+def test_regime_confirmation_bars_allows_sustained_entry():
+    """Streak ≥ entry_confirmation_bars must allow entry."""
+    strat, om = _make_regime(cfg_overrides={
+        "signal_mode": "smoothed",
+        "entry_proba": 0.65,
+        "entry_confirmation_bars": 5,
+    })
+    strat._streak_target = Regime.BULL
+    strat._streak_bars = 6   # one over the requirement
+
+    snap = _snap(0.05, 0.10, 0.85, er=0.001)
+    _run(strat._maybe_enter(snap, None, 100.0))
+    assert strat._in_position is True
+    assert om.orders[0].side == Side.BUY
+
+
+def test_update_streak_increments_on_same_target():
+    strat, _om = _make_regime()
+    strat._update_streak(Regime.BULL)
+    strat._update_streak(Regime.BULL)
+    strat._update_streak(Regime.BULL)
+    assert strat._streak_target == Regime.BULL
+    assert strat._streak_bars == 3
+
+
+def test_update_streak_resets_on_target_flip():
+    strat, _om = _make_regime()
+    strat._update_streak(Regime.BULL)
+    strat._update_streak(Regime.BULL)
+    strat._update_streak(Regime.BEAR)   # different regime → reset to 1
+    assert strat._streak_target == Regime.BEAR
+    assert strat._streak_bars == 1
+
+
+def test_update_streak_resets_on_no_candidate():
+    strat, _om = _make_regime()
+    strat._update_streak(Regime.BULL)
+    strat._update_streak(None)          # no candidate → reset to 0
+    assert strat._streak_target is None
+    assert strat._streak_bars == 0
 
 
 def test_regime_records_last_exit_state_on_close():

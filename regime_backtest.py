@@ -70,21 +70,24 @@ def main() -> None:
     parser.add_argument("--refit-every", type=int, default=168,
                         help="Refit HMM every N bars (168=weekly@1h)")
 
-    parser.add_argument("--entry-proba", type=float, default=0.65)
+    # Defaults below mirror RegimeSwitchingConfig — keep them in sync.
+    parser.add_argument("--entry-proba", type=float, default=0.85)
     parser.add_argument("--exit-proba", type=float, default=0.45)
     parser.add_argument("--max-chop-proba", type=float, default=0.50)
     parser.add_argument("--min-er", type=float, default=1e-4,
                         help="Min |E[r]| per bar to enter (log-return units)")
 
-    parser.add_argument("--stop-loss", type=float, default=0.03)
-    parser.add_argument("--take-profit", type=float, default=0.06,
+    parser.add_argument("--stop-loss", type=float, default=0.12)
+    parser.add_argument("--take-profit", type=float, default=0.0,
                         help="Set to 0 to disable")
-    parser.add_argument("--max-hold-bars", type=int, default=240)
-    parser.add_argument("--min-hold-bars", type=int, default=24,
+    parser.add_argument("--max-hold-bars", type=int, default=1440)
+    parser.add_argument("--min-hold-bars", type=int, default=72,
                         help="Floor before regime-based exits (stops still fire below this)")
-    parser.add_argument("--cooldown-bars", type=int, default=48,
+    parser.add_argument("--cooldown-bars", type=int, default=336,
                         help="No re-entering the same regime for N bars after exit")
-    parser.add_argument("--signal-mode", choices=["smoothed", "viterbi"], default="viterbi",
+    parser.add_argument("--confirmation-bars", type=int, default=8,
+                        help="Require the candidate regime for N consecutive bars before entry")
+    parser.add_argument("--signal-mode", choices=["smoothed", "viterbi"], default="smoothed",
                         help="Drive entries from soft posterior or Viterbi MAP label")
 
     parser.add_argument("--size", type=float, default=100.0)
@@ -115,6 +118,7 @@ def main() -> None:
         max_hold_bars=args.max_hold_bars,
         min_hold_bars=args.min_hold_bars,
         same_regime_cooldown_bars=args.cooldown_bars,
+        entry_confirmation_bars=args.confirmation_bars,
         signal_mode=args.signal_mode,
         position_size_usd=args.size,
         leverage=args.leverage,

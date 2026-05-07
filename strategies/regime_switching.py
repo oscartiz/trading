@@ -58,6 +58,9 @@ class RegimeSwitchingStrategy(Strategy):
         self._target_regime: Regime | None = None
         self._last_exit_regime: Regime | None = None
         self._last_exit_bar_index: int = -10**9
+        # Per-bar candidate streak (mirrors backtest engine logic).
+        self._streak_target: Regime | None = None
+        self._streak_bars: int = 0
 
     def name(self) -> str:
         return "regime_switching"
@@ -127,6 +130,10 @@ class RegimeSwitchingStrategy(Strategy):
         if snap is None:
             return
 
+        # Streak counter must advance every bar — even while in a position —
+        # otherwise re-entries after exit would skip the confirmation gate.
+        self._update_streak(self._candidate_target(snap, viterbi_label))
+
         mid = self._closes[-1]
         regime_label = viterbi_label.label if viterbi_label is not None else snap.label
         logger.info(
@@ -168,24 +175,40 @@ class RegimeSwitchingStrategy(Strategy):
     # ------------------------------------------------------------------ #
     #  Entry / exit                                                        #
     # ------------------------------------------------------------------ #
-    async def _maybe_enter(self, snap, viterbi_label: Regime | None, mid: float) -> None:
+    def _candidate_target(self, snap, viterbi_label: Regime | None) -> Regime | None:
+        """Return the regime we'd enter on this bar absent streak/cooldown gates."""
         p_bear, p_chop, p_bull = snap.proba
-        target: Regime | None = None
-
         if self.cfg.signal_mode == "viterbi":
             if viterbi_label == Regime.BULL and snap.expected_return >= self.cfg.min_expected_return_per_bar:
-                target = Regime.BULL
-            elif viterbi_label == Regime.BEAR and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
-                target = Regime.BEAR
-        else:
-            if p_chop > self.cfg.max_chop_proba:
-                return
-            if p_bull >= self.cfg.entry_proba and snap.expected_return >= self.cfg.min_expected_return_per_bar:
-                target = Regime.BULL
-            elif p_bear >= self.cfg.entry_proba and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
-                target = Regime.BEAR
+                return Regime.BULL
+            if viterbi_label == Regime.BEAR and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
+                return Regime.BEAR
+            return None
+        if p_chop > self.cfg.max_chop_proba:
+            return None
+        if p_bull >= self.cfg.entry_proba and snap.expected_return >= self.cfg.min_expected_return_per_bar:
+            return Regime.BULL
+        if p_bear >= self.cfg.entry_proba and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
+            return Regime.BEAR
+        return None
 
+    def _update_streak(self, candidate: Regime | None) -> None:
+        if candidate is not None and candidate == self._streak_target:
+            self._streak_bars += 1
+        elif candidate is not None:
+            self._streak_target = candidate
+            self._streak_bars = 1
+        else:
+            self._streak_target = None
+            self._streak_bars = 0
+
+    async def _maybe_enter(self, snap, viterbi_label: Regime | None, mid: float) -> None:
+        target = self._candidate_target(snap, viterbi_label)
         if target is None:
+            return
+
+        # Confirmation: candidate must have been consistent for ≥ N bars.
+        if self._streak_bars < self.cfg.entry_confirmation_bars:
             return
 
         # Same-regime cooldown after a recent exit.

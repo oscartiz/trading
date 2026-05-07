@@ -28,23 +28,25 @@ class Sweep(NamedTuple):
     min_hold_bars: int
     same_regime_cooldown_bars: int
     max_hold_bars: int
+    entry_confirmation_bars: int = 0
 
 
 SWEEPS: list[Sweep] = [
-    # Baseline — current defaults (TP at 6%, tight 3% stop, short max hold).
-    Sweep("baseline-tp6-stop3",      "viterbi",  0.65, 0.03, 0.06, 24,  48,  240),
+    # ── Reference: previous winner ─────────────────────────────────────────
+    Sweep("ref-p85-stop12",          "smoothed", 0.85, 0.12, None, 72,  168,  720,   0),
 
-    # No TP, widen stop, longer max hold — Viterbi-driven.
-    Sweep("viterbi-stop05-noTP",     "viterbi",  0.65, 0.05, None, 24,  168, 720),
-    Sweep("viterbi-stop08-noTP",     "viterbi",  0.65, 0.08, None, 24,  168, 720),
-    Sweep("viterbi-stop12-noTP",     "viterbi",  0.65, 0.12, None, 48,  168, 720),
-
-    # Smoothed posterior with high-confidence entry threshold.
-    Sweep("smoothed-p70-stop05",     "smoothed", 0.70, 0.05, None, 24,  48,  720),
-    Sweep("smoothed-p70-stop08",     "smoothed", 0.70, 0.08, None, 24,  168, 720),
-    Sweep("smoothed-p80-stop08",     "smoothed", 0.80, 0.08, None, 24,  168, 720),
-    Sweep("smoothed-p80-stop12",     "smoothed", 0.80, 0.12, None, 48,  168, 720),
-    Sweep("smoothed-p85-stop12",     "smoothed", 0.85, 0.12, None, 72,  168, 720),
+    # ── Low-frequency, ride-the-regime: ~1 trade/month or fewer ────────────
+    # Confirmation bars target the 4-12 hour range so the posterior has time to
+    # settle but we don't lock ourselves out of every regime entirely.
+    Sweep("lf-p85-cd720-conf4",      "smoothed", 0.85, 0.12, None, 72,  720,  1440,  4),
+    Sweep("lf-p85-cd720-conf6",      "smoothed", 0.85, 0.12, None, 72,  720,  1440,  6),
+    Sweep("lf-p85-cd720-conf8",      "smoothed", 0.85, 0.12, None, 72,  720,  1440,  8),
+    Sweep("lf-p85-cd720-conf10",     "smoothed", 0.85, 0.12, None, 72,  720,  1440, 10),
+    Sweep("lf-p85-cd720-conf12",     "smoothed", 0.85, 0.12, None, 72,  720,  1440, 12),
+    Sweep("lf-p85-cd336-conf6",      "smoothed", 0.85, 0.12, None, 72,  336,  1440,  6),
+    Sweep("lf-p85-cd336-conf8",      "smoothed", 0.85, 0.12, None, 72,  336,  1440,  8),
+    Sweep("lf-p90-cd336-conf4",      "smoothed", 0.90, 0.12, None, 72,  336,  1440,  4),
+    Sweep("lf-p90-cd336-conf6",      "smoothed", 0.90, 0.12, None, 72,  336,  1440,  6),
 ]
 
 
@@ -63,6 +65,7 @@ def run_sweep(coin: str, start: datetime, end: datetime, refit_every: int) -> li
             take_profit_pct=s.take_profit_pct,
             min_hold_bars=s.min_hold_bars,
             same_regime_cooldown_bars=s.same_regime_cooldown_bars,
+            entry_confirmation_bars=s.entry_confirmation_bars,
             max_hold_bars=s.max_hold_bars,
             signal_mode=s.signal_mode,
         )

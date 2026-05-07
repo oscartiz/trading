@@ -56,8 +56,10 @@ class RegimeSwitchingConfig:
     # Take profit disabled by default — let the regime change be the exit
     # signal so we don't cap winning trends.
     take_profit_pct: float | None = None
-    # Max hold time regardless of regime (bars). 30 days at 1h candles.
-    max_hold_bars: int = 720
+    # Max hold time regardless of regime (bars). 60 days at 1h candles —
+    # generous because the new defaults rarely trade and we want to ride
+    # multi-month regime episodes to completion.
+    max_hold_bars: int = 1440
     # Floor before regime-based exits can fire — stops still fire below this.
     # Suppresses whipsaw when the smoothed posterior wobbles right after entry.
     min_hold_bars: int = 72               # 3 days at 1h
@@ -65,7 +67,11 @@ class RegimeSwitchingConfig:
     # ---- regime persistence ----
     # After exiting a regime, refuse to re-enter that same regime for N bars.
     # Forces a cool-off before opening another trade in the same direction.
-    same_regime_cooldown_bars: int = 168   # 7 days at 1h
+    same_regime_cooldown_bars: int = 336   # 14 days at 1h
+    # Require the candidate target regime to have been the (smoothed-posterior or
+    # viterbi) entry signal for this many *consecutive* bars before opening.
+    # Filters out posterior spikes that revert. 8h sustained signal at 1h candles.
+    entry_confirmation_bars: int = 8
     # "smoothed" — drive decisions from the posterior P(state | x).
     # "viterbi" — drive decisions from the MAP state at the latest bar; this
     # yields one trade per Viterbi run of bull/bear bars but is slower to

@@ -25,13 +25,14 @@ Default parameters (conservative, small account):
 | Poll interval | 10 min | REST API, not WebSocket |
 
 ### Regime Switching
-Fits a 3-state Gaussian Hidden Markov Model (HMM) to hourly log returns and labels every bar as **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Designed to **ride a regime to its end**: enter only when the model is highly confident, then hold until the regime itself changes — the regime exit, not a fixed take-profit, is what closes winning trades.
+Fits a 3-state Gaussian Hidden Markov Model (HMM) to hourly log returns and labels every bar as **bear**, **chop**, or **bull** by sorting the latent states on emission mean. Tuned for a **low-frequency, high-confidence** style: only a few trades a year, each one only opened after the model has been confident in the same direction for several hours, then held until the regime itself changes. Slippage and fees on small notional are non-trivial, so trade count is deliberately suppressed.
 
-- **P(bull) ≥ 0.85** and chop not dominant → opens long
-- **P(bear) ≥ 0.85** and chop not dominant → opens short
+- **P(bull) ≥ 0.85** sustained for `entry_confirmation_bars` (8 hours by default) → opens long
+- **P(bear) ≥ 0.85** sustained for `entry_confirmation_bars` → opens short
+- Confirmation gate prevents entries on brief posterior spikes that revert; the candidate regime must be the entry signal for N consecutive bars before any order fires
 - Holds for at least `min_hold_bars` (3 days) so the smoothed posterior can't whipsaw a fresh entry
-- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 30-day time cap is hit — there is **no fixed take-profit**
-- After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (7 days) so we don't immediately re-open the trade we just closed
+- Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 60-day time cap is hit — there is **no fixed take-profit**
+- After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (14 days) so we don't immediately re-open the trade we just closed
 
 The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper). See `strategies/configs.py:RegimeSwitchingConfig` for the full parameter set, and `tools/regime_sweep.py` for the parameter-sweep harness used to pick the defaults.
 
@@ -43,19 +44,25 @@ The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly b
 
 The three panels show: BTC price with labelled long/short entries and profitable/loss exits; the hourly funding rate against entry (0.02%/hr) and exit (0.005%/hr) thresholds; and cumulative USD P&L over the year. The strategy captured several high-funding episodes but gave back gains during the flat mid-year period, finishing slightly negative at $50 notional / 1× leverage — consistent with a conservative parameter set on a year where funding was often below threshold.
 
-### Regime switching — BTC 2024 | 28 trades | Net P&L: +$30.16 | Sharpe 1.49
+### Regime switching — BTC 2024 | 3 trades | Net P&L: +$16.21 | Sharpe 2.20
 
 ![Regime BTC 2024](data/charts/regime_BTC_20240101_20250101.png)
 
 Run with `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`. The three panels show: BTC price with regime-shaded background (red=bear, grey=chop, green=bull) and labelled trade entries/exits; the rolling smoothed posteriors P(bear), P(chop), P(bull) with the entry/exit thresholds; and cumulative USD P&L.
 
-The first iteration of this strategy used `entry ≥ 0.65 / exit < 0.45 / 3% stop / 6% TP / 240-bar max hold` and lost money on 315 trades (-$2.48, Sharpe -0.12). 298 of those 315 exits fired on `regime_weakened`, meaning the smoothed posterior was wobbling across the 0.45 threshold and stopping us out before any regime had time to play out. Three changes fixed it:
+The strategy went through three tuning iterations:
 
-1. **High-confidence entry** — `P ≥ 0.85` instead of `0.65`. The market spends a small fraction of time in a high-conviction regime, and entries during that fraction have real edge; entries below that threshold are noise.
-2. **Wide stop, no take-profit** — 12% stop and `take_profit_pct=None`. The intent is to ride the regime to its actual end, so the regime change (not a price cap) does the exiting. With the 0.85 entry gate, the wide stop is rarely tested — zero stop-outs across all 28 trades on this period.
-3. **Persistence guards** — `min_hold_bars=72` (3 days) before any regime-based exit fires, plus `same_regime_cooldown_bars=168` (7 days) preventing re-entry into the same regime we just left. Together these turn a single regime episode into a single trade.
+| Iteration | Trades | Net P&L | Sharpe | Notes |
+|---|---|---|---|---|
+| 1. Baseline (`P≥0.65, 3% stop, 6% TP, no confirm`) | 315 | -$2.48 | -0.12 | Whipsaws — 298/315 exits on `regime_weakened` |
+| 2. Ride-the-regime (`P≥0.85, 12% stop, no TP, 7d cooldown`) | 28 | +$30.16 | 1.49 | Zero stop-outs, but 2-3 trades/month |
+| 3. Low-frequency (`+ 8h confirmation, 14d cooldown, 60d max-hold`) | **3** | **+$16.21** | **2.20** | ~1 trade per 4 months |
 
-Result on BTC 2024: **28 trades (14 long / 14 short), 57.1% win rate, 74.4h avg hold, +$30.16 net at $100 notional / 1×, Sharpe 1.49, max drawdown -17% of position size, 27 of 28 exits via `regime_weakened`** (the remaining one was the open trade closed at the end of the backtest). The defaults in `RegimeSwitchingConfig` were picked by `tools/regime_sweep.py`, which compares 9 configurations across the same period; see that script for the alternatives considered. **Caveats:** this is a single-period in-sample fit on a single coin — running the same sweep on ETH and on 2022/2023 BTC is the obvious next step before trusting these defaults out-of-sample.
+The shift from iteration 2 → 3 trades total throughput (P&L per year drops ~50%) for **per-trade efficiency** (P&L per trade jumps from $1.08 → $5.40) and far less exposure to slippage and fees. With $100 notional and 1× leverage, a $5/trade average is several times the round-trip taker fee, which is the right margin of safety for small accounts.
+
+Result on BTC 2024: **3 trades (3 long / 0 short), 100% win rate, 61.7h avg hold, +$16.21 net at $100 notional / 1×, Sharpe 2.20, max drawdown -4% of position size, 2 of 3 exits via `regime_weakened`** (the third was the open trade closed at the end of the backtest). Defaults picked by `tools/regime_sweep.py`, which compares 10 low-frequency configurations.
+
+**Caveats — read these before deploying:** *(1)* `n=3` trades means single-trade noise dominates: a 100% win rate is essentially noise, and one unlucky regime call would flip the year's metrics dramatically. *(2)* This is a single-period in-sample fit on a single coin — running the same sweep on ETH and on 2022/2023 BTC is the obvious next step before trusting these defaults out-of-sample. *(3)* Long-only on this period — bear regimes never sustained the 8-bar confirmation gate, so the strategy never went short; that may be a 2024-specific artefact (BTC was largely up-trending) or a structural bias of the gate.
 
 ## Setup
 
