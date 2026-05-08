@@ -21,8 +21,8 @@ def _t(year: int, month: int = 1, day: int = 1) -> datetime:
 
 
 def test_cache_path_includes_coin_and_window():
-    p = data_mod._cache_path("funding", "BTC", _t(2024), _t(2025))
-    assert p.name == f"funding_BTC_{int(_t(2024).timestamp())}_{int(_t(2025).timestamp())}.parquet"
+    p = data_mod._cache_path("prices_bn", "BTC", _t(2024), _t(2025))
+    assert p.name == f"prices_bn_BTC_{int(_t(2024).timestamp())}_{int(_t(2025).timestamp())}.parquet"
     assert p.parent.name == "cache"
 
 
@@ -32,95 +32,12 @@ def test_cache_path_extra_suffix_used_for_intervals():
 
 
 # --------------------------------------------------------------------------- #
-#  fetch_funding_history                                                       #
+#  fetch_price_history                                                         #
 # --------------------------------------------------------------------------- #
 
 
 def _redirect_cache(tmp_path: Path):
     return patch.object(data_mod, "CACHE_DIR", tmp_path)
-
-
-def test_funding_cache_hit_skips_network(tmp_path):
-    """When the parquet exists, no _info() / Info.funding_history call should happen."""
-    df = pd.DataFrame({
-        "timestamp": pd.to_datetime([_t(2024)], utc=True),
-        "funding_rate": [0.0001],
-    })
-    cache_path = tmp_path / f"funding_BTC_{int(_t(2024).timestamp())}_{int(_t(2025).timestamp())}.parquet"
-    df.to_parquet(cache_path)
-
-    fake_info_factory = MagicMock(side_effect=AssertionError("must not be called"))
-
-    with _redirect_cache(tmp_path), patch.object(data_mod, "_info", fake_info_factory):
-        out = data_mod.fetch_funding_history("BTC", _t(2024), _t(2025))
-
-    assert len(out) == 1
-    assert "funding_rate" in out.columns
-    fake_info_factory.assert_not_called()
-
-
-def test_funding_cache_miss_fetches_and_writes(tmp_path):
-    fake_info = MagicMock()
-    # First call returns two records; second call returns empty so the loop terminates.
-    fake_info.funding_history.side_effect = [
-        [
-            {"time": int(_t(2024).timestamp() * 1000), "fundingRate": "0.0001"},
-            {"time": int(_t(2024, 6, 1).timestamp() * 1000), "fundingRate": "0.0002"},
-        ],
-        [],
-    ]
-    info_factory = MagicMock(return_value=fake_info)
-
-    with _redirect_cache(tmp_path), patch.object(data_mod, "_info", info_factory):
-        out = data_mod.fetch_funding_history("BTC", _t(2024), _t(2025))
-
-    assert len(out) == 2
-    assert list(out.columns) == ["timestamp", "funding_rate"]
-    assert out["funding_rate"].iloc[0] == pytest.approx(0.0001)
-    cache_files = list(tmp_path.glob("funding_BTC_*.parquet"))
-    assert len(cache_files) == 1
-
-
-def test_funding_force_refetches_even_with_cache(tmp_path):
-    """force=True must skip the cache and call the API."""
-    cache_path = tmp_path / f"funding_BTC_{int(_t(2024).timestamp())}_{int(_t(2025).timestamp())}.parquet"
-    pd.DataFrame({
-        "timestamp": pd.to_datetime([_t(2024)], utc=True),
-        "funding_rate": [0.0],
-    }).to_parquet(cache_path)
-
-    fake_info = MagicMock()
-    fake_info.funding_history.return_value = [
-        {"time": int(_t(2024, 3, 1).timestamp() * 1000), "fundingRate": "0.0009"},
-    ]
-    info_factory = MagicMock(return_value=fake_info)
-
-    with _redirect_cache(tmp_path), patch.object(data_mod, "_info", info_factory):
-        out = data_mod.fetch_funding_history("BTC", _t(2024), _t(2025), force=True)
-
-    assert out["funding_rate"].iloc[0] == pytest.approx(0.0009)
-
-
-def test_funding_paginates_until_cursor_does_not_advance(tmp_path):
-    """If the API stops returning new rows the loop must terminate."""
-    fake_info = MagicMock()
-    # First call returns one row, second call returns same timestamp → loop must break.
-    fake_info.funding_history.side_effect = [
-        [{"time": 1_000, "fundingRate": "0.0001"}],
-        [{"time": 1_000, "fundingRate": "0.0001"}],   # cursor would not advance
-        AssertionError("should have exited"),
-    ]
-    info_factory = MagicMock(return_value=fake_info)
-
-    with _redirect_cache(tmp_path), patch.object(data_mod, "_info", info_factory):
-        out = data_mod.fetch_funding_history("BTC", _t(2024), _t(2025))
-
-    assert len(out) == 1
-
-
-# --------------------------------------------------------------------------- #
-#  fetch_price_history                                                         #
-# --------------------------------------------------------------------------- #
 
 
 def test_price_cache_hit_skips_network(tmp_path):

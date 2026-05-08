@@ -9,8 +9,7 @@ from config import settings
 from execution import OrderManager, PaperOrderManager, build_clients
 from risk import RiskConfig, RiskManager
 from runtime import equity_watchdog, make_live_equity_source
-from strategies.configs import FundingConfig, RegimeSwitchingConfig
-from strategies.funding_rate import FundingRateStrategy
+from strategies.configs import RegimeSwitchingConfig
 from strategies.regime_switching import RegimeSwitchingStrategy
 
 
@@ -22,32 +21,17 @@ def setup_logging() -> None:
     logger.add("logs/trading.log", rotation="100 MB", retention="30 days", level="DEBUG")
 
 
-def build_strategies(name: str, coin: str, order_manager: OrderManager, risk: RiskManager):
-    if name == "funding":
-        return [FundingRateStrategy(
-            coin=coin, order_manager=order_manager, risk=risk,
-            config=FundingConfig(
-                entry_threshold=0.0002,
-                exit_threshold=0.00005,
-                stop_loss_pct=0.02,
-                max_hold_hours=48,
-                position_size_usd=50.0,
-                poll_interval_seconds=600,
-            ),
-        )]
-    if name == "regime":
-        return [RegimeSwitchingStrategy(
-            coin=coin, order_manager=order_manager, risk=risk,
-            config=RegimeSwitchingConfig(),
-        )]
-    raise ValueError(f"Unknown strategy '{name}'. Available: funding, regime")
+def build_strategy(coin: str, order_manager, risk: RiskManager) -> RegimeSwitchingStrategy:
+    return RegimeSwitchingStrategy(
+        coin=coin, order_manager=order_manager, risk=risk,
+        config=RegimeSwitchingConfig(),
+    )
 
 
 async def main() -> None:
     setup_logging()
 
-    parser = argparse.ArgumentParser(description="Run a trading strategy live.")
-    parser.add_argument("--strategy", default="funding", choices=["funding", "regime"])
+    parser = argparse.ArgumentParser(description="Run the regime-switching strategy live.")
     parser.add_argument("--coin", default="BTC")
     parser.add_argument("--paper", action="store_true",
                         help="Paper-trade mode: real market data, simulated fills, no orders sent")
@@ -56,8 +40,8 @@ async def main() -> None:
     args = parser.parse_args()
 
     logger.info(
-        "Starting | strategy={} coin={} testnet={} paper={}",
-        args.strategy, args.coin, settings.testnet, args.paper,
+        "Starting | coin={} testnet={} paper={}",
+        args.coin, settings.testnet, args.paper,
     )
 
     info, exchange = build_clients(read_only=args.paper)
@@ -75,10 +59,10 @@ async def main() -> None:
         order_manager = OrderManager(info, exchange)
         get_equity = make_live_equity_source(info, settings.account_address)
 
-    strategies = build_strategies(args.strategy, args.coin, order_manager, risk)
+    strategy = build_strategy(args.coin, order_manager, risk)
 
     await asyncio.gather(
-        *[s.run() for s in strategies],
+        strategy.run(),
         equity_watchdog(get_equity, risk, poll_seconds=60.0),
     )
 

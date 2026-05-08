@@ -1,13 +1,12 @@
 """Tests for runtime.state.StateStore and per-strategy state persistence."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
 
 from execution import Side
 from risk import RiskConfig, RiskManager
 from runtime import StateStore
-from strategies.configs import FundingConfig, RegimeSwitchingConfig
-from strategies.funding_rate import FundingRateStrategy
+from strategies.configs import RegimeSwitchingConfig
 from strategies.regime import Regime
 from strategies.regime_switching import RegimeSwitchingStrategy
 
@@ -65,53 +64,6 @@ def test_state_store_isolates_by_name_and_coin(tmp_path):
     assert a.load() == {"who": "a-btc"}
     assert b.load() == {"who": "b-btc"}
     assert c.load() == {"who": "a-eth"}
-
-
-# --------------------------------------------------------------------------- #
-#  Funding strategy persistence                                                #
-# --------------------------------------------------------------------------- #
-
-
-def _make_funding(state: StateStore, mid: float = 100.0) -> tuple[FundingRateStrategy, FakeOrderManager]:
-    info = FakeInfo(mid=mid)
-    om = FakeOrderManager(info=info)
-    risk = RiskManager(RiskConfig(max_order_usd=10_000, max_position_usd=10_000, max_drawdown_pct=1.0))
-    cfg = FundingConfig(entry_threshold=0.0002)
-    return FundingRateStrategy("BTC", om, risk, cfg, state_store=state), om  # type: ignore[arg-type]
-
-
-def test_funding_state_persists_across_instances(tmp_path):
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    s1, _ = _make_funding(store)
-    s1._in_position = True
-    s1._position_side = Side.SELL
-    s1._entry_price = 100.0
-    s1._entry_time = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
-    s1._save_state()
-
-    # Fresh instance — same store path
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s2, _ = _make_funding(store2)
-    assert s2._in_position is True
-    assert s2._position_side == Side.SELL
-    assert s2._entry_price == 100.0
-    assert s2._entry_time == datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
-
-
-def test_funding_state_clears_after_reset(tmp_path):
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, _ = _make_funding(store)
-    s._in_position = True
-    s._position_side = Side.BUY
-    s._entry_price = 50.0
-    s._entry_time = datetime.now(timezone.utc)
-    s._save_state()
-
-    s._reset()  # clears in-memory and saves new flat state
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s2, _ = _make_funding(store2)
-    assert s2._in_position is False
-    assert s2._entry_price is None
 
 
 # --------------------------------------------------------------------------- #
@@ -209,14 +161,23 @@ def test_regime_default_state_store_uses_default_dir(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Startup reconciliation                                                      #
+#  Startup reconciliation — covers shared base-class behaviour                 #
 # --------------------------------------------------------------------------- #
+
+
+def _seed_open_position(s: RegimeSwitchingStrategy, side: Side) -> None:
+    s._in_position = True
+    s._position_side = side
+    s._entry_price = 100.0
+    s._entry_bar_index = 0
+    s._target_regime = Regime.BULL if side == Side.BUY else Regime.BEAR
+    s._save_state()
 
 
 def test_reconcile_clean_startup_does_not_block(tmp_path):
     """No saved state, no exchange position — strategy is free to trade."""
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store)
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store)
     om.position = None
     s._check_existing_position()
     assert s._block_entries is False
@@ -224,32 +185,24 @@ def test_reconcile_clean_startup_does_not_block(tmp_path):
 
 def test_reconcile_matched_long_position_does_not_block(tmp_path):
     """Saved state says we're long; exchange agrees. Recovery is clean."""
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    pre, _ = _make_funding(store)
-    pre._in_position = True
-    pre._position_side = Side.BUY
-    pre._entry_price = 100.0
-    pre._entry_time = datetime.now(timezone.utc)
-    pre._save_state()
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    pre, _ = _make_regime(store)
+    _seed_open_position(pre, Side.BUY)
 
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store2)
+    store2 = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store2)
     om.position = {"coin": "BTC", "szi": "0.5"}    # positive = long
     s._check_existing_position()
     assert s._block_entries is False
 
 
 def test_reconcile_matched_short_position_does_not_block(tmp_path):
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    pre, _ = _make_funding(store)
-    pre._in_position = True
-    pre._position_side = Side.SELL
-    pre._entry_price = 100.0
-    pre._entry_time = datetime.now(timezone.utc)
-    pre._save_state()
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    pre, _ = _make_regime(store)
+    _seed_open_position(pre, Side.SELL)
 
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store2)
+    store2 = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store2)
     om.position = {"coin": "BTC", "szi": "-0.5"}   # negative = short
     s._check_existing_position()
     assert s._block_entries is False
@@ -257,8 +210,8 @@ def test_reconcile_matched_short_position_does_not_block(tmp_path):
 
 def test_reconcile_orphan_exchange_position_blocks_entries(tmp_path):
     """No saved state but exchange has a position — refuse to add to it."""
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store)
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store)
     om.position = {"coin": "BTC", "szi": "0.3"}
     s._check_existing_position()
     assert s._block_entries is True
@@ -266,16 +219,12 @@ def test_reconcile_orphan_exchange_position_blocks_entries(tmp_path):
 
 def test_reconcile_phantom_state_blocks_entries(tmp_path):
     """Saved state says we're long but exchange is flat — someone closed under us."""
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    pre, _ = _make_funding(store)
-    pre._in_position = True
-    pre._position_side = Side.BUY
-    pre._entry_price = 100.0
-    pre._entry_time = datetime.now(timezone.utc)
-    pre._save_state()
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    pre, _ = _make_regime(store)
+    _seed_open_position(pre, Side.BUY)
 
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store2)
+    store2 = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store2)
     om.position = None
     s._check_existing_position()
     assert s._block_entries is True
@@ -283,36 +232,35 @@ def test_reconcile_phantom_state_blocks_entries(tmp_path):
 
 def test_reconcile_side_mismatch_blocks_entries(tmp_path):
     """Saved state says long but exchange is short — hard mismatch."""
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    pre, _ = _make_funding(store)
-    pre._in_position = True
-    pre._position_side = Side.BUY
-    pre._entry_price = 100.0
-    pre._entry_time = datetime.now(timezone.utc)
-    pre._save_state()
+    store = StateStore("regime_switching", "BTC", root=tmp_path)
+    pre, _ = _make_regime(store)
+    _seed_open_position(pre, Side.BUY)
 
-    store2 = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store2)
+    store2 = StateStore("regime_switching", "BTC", root=tmp_path)
+    s, om = _make_regime(store2)
     om.position = {"coin": "BTC", "szi": "-0.5"}
     s._check_existing_position()
     assert s._block_entries is True
 
 
-def test_blocked_entries_skip_funding_check_entry(tmp_path):
-    """Entries blocked → _check_entry must not place an order even on a clear signal."""
-    import asyncio
-    store = StateStore("funding_rate", "BTC", root=tmp_path)
-    s, om = _make_funding(store)
-    s._block_entries = True
-    asyncio.run(s._check_entry(funding=0.0005, mid=100.0))
-    assert s._in_position is False
-    assert om.orders == []
+def test_blocked_entries_skip_regime_maybe_enter(tmp_path):
+    """Entries blocked → _maybe_enter must not place an order even on a clear bull signal."""
+    import numpy as np
 
+    from strategies.regime import RegimeSnapshot
 
-def test_reconcile_blocks_regime_entries(tmp_path):
-    """Same logic for the regime strategy: orphan position blocks _maybe_enter."""
     store = StateStore("regime_switching", "BTC", root=tmp_path)
     s, om = _make_regime(store)
-    om.position = {"coin": "BTC", "szi": "0.1"}
-    s._check_existing_position()
-    assert s._block_entries is True
+    s._block_entries = True
+    s._streak_target = Regime.BULL
+    s._streak_bars = 100   # any confirmation bar requirement is met
+
+    snap = RegimeSnapshot(
+        regime=Regime.BULL,
+        proba=np.array([0.05, 0.10, 0.85]),
+        expected_return=0.001,
+        expected_vol=0.01,
+    )
+    asyncio.run(s._maybe_enter(snap, None, 100.0))
+    assert s._in_position is False
+    assert om.orders == []

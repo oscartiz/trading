@@ -108,17 +108,12 @@ class FakeOrder:
 @dataclass
 class FakeInfo:
     """Stand-in for hyperliquid.info.Info — only methods strategies call."""
-    funding_rate: float = 0.0
     mid: float = 100.0
     candles: list[dict] = field(default_factory=list)
     user_state_data: dict = field(default_factory=lambda: {"assetPositions": []})
 
     def all_mids(self) -> dict:
         return {"BTC": self.mid, "ETH": self.mid, "SOL": self.mid}
-
-    def meta_and_asset_ctxs(self) -> tuple[dict, list]:
-        return ({"universe": [{"name": "BTC"}]},
-                [{"funding": str(self.funding_rate)}])
 
     def candles_snapshot(self, coin: str, interval: str, start_ms: int, end_ms: int) -> list[dict]:
         return [c for c in self.candles if start_ms <= int(c["t"]) <= end_ms]

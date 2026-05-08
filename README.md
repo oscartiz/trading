@@ -2,44 +2,7 @@
 
 Algorithmic trading bot for [Hyperliquid](https://hyperliquid.xyz) perpetual futures, written in Python.
 
-Two strategies are implemented, with very different theses:
-
-| Strategy | Trades on | Edge thesis | Position bias |
-|---|---|---|---|
-| **Funding-rate carry** | Hourly funding rate extremes | Crowded positioning pays the receiving side | Counter-trend (shorts in rallies, longs in selloffs) |
-| **Regime switching (HMM)** | 3-state HMM posterior on hourly returns | Bull/bear regimes cluster — once identified, ride them | With-trend (longs in bulls, shorts in bears) |
-
----
-
-## Funding-rate carry
-
-Pure carry trade — no price prediction. When the perpetual funding rate is extreme it means one side of the book is crowded, and the receiving side gets paid hourly until positioning normalises.
-
-- **Positive funding** → opens **short** (longs are paying us)
-- **Negative funding** → opens **long** (shorts are paying us)
-
-Exits when funding normalises, flips sign, the 2% stop fires, or the 48h time cap is hit.
-
-Default parameters:
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Position size | $50 notional | conservative, small account |
-| Leverage | 1× cross | |
-| Entry threshold | 0.02%/hr | ≈175%/yr annualised |
-| Exit threshold | 0.005%/hr | rate no longer worth holding |
-| Stop loss | 2% | hard directional cut |
-| Max hold | 48h | time cap regardless of funding |
-
-### Backtest — BTC 2024 | 12 trades | Net P&L: −$6.63
-
-![Funding BTC 2024](data/charts/backtest_BTC_20240101_20250101.png)
-
-The three panels show BTC price with entry/exit markers, the hourly funding rate against the entry/exit thresholds, and the cumulative USD P&L curve.
-
-**What happened:** funding spent most of 2024 below the 0.02%/hr threshold, so the strategy mostly stayed flat. It engaged on a handful of crowded-positioning episodes — typically right before BTC pivoted, since that's when funding extremes appear. A few captures landed cleanly, but two stop-outs during sharp directional moves wiped most of the carry gains, and the strategy finished the year slightly negative on $50 notional. The takeaway is structural: low-funding years on BTC don't offer enough carry to overcome the occasional 2% stop-out at this size.
-
----
+A 3-state Hidden Markov Model labels each hourly bar **bear**, **chop**, or **bull**, and the strategy goes with the trend — long in bulls, short in bears, flat in chop.
 
 ## Regime switching (HMM)
 
@@ -70,7 +33,7 @@ The out-of-sample stress test. BTC fell from $47k to $16k in 2022, with the Luna
 
 **What happened:** the model spotted the regime shifts and shorted into them — 4 of the 6 trades were shorts, all clustered around the major capitulations. The two longs caught the relief rallies between flushes. 67% win rate, +$16.77 net at $100 notional, all exits via `regime_weakened`. The $50k → $16k drawdown in spot is the backdrop against which a +$16 P&L lands; the strategy didn't dodge the bear, it profited from it.
 
-### Tuning history (regime strategy, BTC 2024)
+### Tuning history (BTC 2024)
 
 | Iteration | Trades | Net P&L | Notes |
 |---|---|---|---|
@@ -126,20 +89,10 @@ LOG_LEVEL=INFO
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=. python main.py --strategy funding --coin BTC
-PYTHONPATH=. python main.py --strategy regime  --coin BTC
+PYTHONPATH=. python main.py --coin BTC
 ```
 
-Logs go to stderr and `logs/trading.log`. Example output:
-
-```
-INFO | Hyperliquid clients ready | testnet=True
-INFO | funding_rate | BTC started | entry≥0.0200%/hr exit≤0.0050%/hr stop=2% size=$50
-INFO | BTC | funding=+0.02341%/hr (+205.1%/yr) mid=65432.00 in_position=False
-INFO | BTC | entering Sell | funding=+0.02341%/hr size=0.000764 @ 65432.00
-INFO | BTC | funding=+0.01100%/hr (+96.4%/yr) mid=65210.00 in_position=True
-INFO | BTC | exiting | reasons: funding normalised (+0.00412%/hr)
-```
+Logs go to stderr and `logs/trading.log`.
 
 ## Test-mode runbook
 
@@ -147,10 +100,10 @@ For a multi-day shakeout before live capital, use one of:
 
 ```bash
 # Paper mode on real mainnet data — simulated fills, no orders sent
-HL_TESTNET=false PYTHONPATH=. python main.py --strategy regime --coin BTC --paper --paper-equity 1000
+HL_TESTNET=false PYTHONPATH=. python main.py --coin BTC --paper --paper-equity 1000
 
 # Real orders on Hyperliquid testnet
-HL_TESTNET=true  PYTHONPATH=. python main.py --strategy regime --coin BTC
+HL_TESTNET=true  PYTHONPATH=. python main.py --coin BTC
 ```
 
 Paper mode does not require `HL_PRIVATE_KEY` — `build_clients(read_only=True)`
@@ -161,11 +114,11 @@ For a multi-day run, wrap the command so it survives the terminal closing:
 ```bash
 # Option 1 — tmux (re-attachable)
 tmux new -s trading
-HL_TESTNET=false PYTHONPATH=. python main.py --strategy regime --coin BTC --paper --paper-equity 1000
+HL_TESTNET=false PYTHONPATH=. python main.py --coin BTC --paper --paper-equity 1000
 # Ctrl-B then D to detach; `tmux attach -t trading` to come back
 
 # Option 2 — nohup (fire-and-forget)
-HL_TESTNET=false PYTHONPATH=. nohup python main.py --strategy regime --coin BTC --paper --paper-equity 1000 &
+HL_TESTNET=false PYTHONPATH=. nohup python main.py --coin BTC --paper --paper-equity 1000 &
 ```
 
 Monitoring the run:
@@ -182,19 +135,19 @@ cat state/regime_switching_BTC.json
 cat state/risk_global.json
 
 # Is the process still alive?
-ps aux | grep "main.py --strategy" | grep -v grep
+ps aux | grep "main.py" | grep -v grep
 ```
 
-The regime strategy averages ~one trade per month and refits weekly, so the
+The strategy averages ~one trade per month and refits weekly, so the
 filtered tail is silent for hours at a time by design — that's the expected
 state, not a problem.
 
 What's running alongside the strategy:
 
-- **State persistence** (`state/{strategy}_{coin}.json`). Position flags, regime
-  streak counters, cooldown index, and last bar processed are written every
-  tick. Restart the bot any time — it picks up where it left off and replays
-  any bars that closed during downtime.
+- **State persistence** (`state/regime_switching_{coin}.json`). Position flags,
+  regime streak counters, cooldown index, and last bar processed are written
+  every tick. Restart the bot any time — it picks up where it left off and
+  replays any bars that closed during downtime.
 - **Drawdown halt.** A watchdog polls account equity every 60s, tracks the
   high-water mark, and halts new entries if drawdown breaches `max_drawdown_pct`
   (default 5%). Existing positions still close via the strategy's normal exit
@@ -236,27 +189,22 @@ trading/
 │   └── watchdog.py           # equity_watchdog + live equity source
 ├── strategies/
 │   ├── base.py               # abstract Strategy + startup reconciliation
-│   ├── funding_rate.py       # funding rate carry strategy
 │   ├── regime_switching.py   # HMM-based 3-state regime strategy
 │   ├── regime.py             # 3-state classifier wrapping the HMM
 │   ├── hmm.py                # numpy-only Gaussian HMM
-│   ├── configs.py            # strategy parameter dataclasses
+│   ├── configs.py            # strategy parameter dataclass
 │   └── example_momentum.py   # stub example
 ├── backtesting/
-│   ├── engine.py             # funding-rate backtest engine
 │   ├── regime_engine.py      # regime-switching backtest engine
-│   ├── charts.py             # funding-rate chart
 │   ├── regime_charts.py      # regime-switching chart
-│   ├── data.py               # cached price + funding history
-│   └── metrics.py            # backtest metrics
-├── backtest.py       # CLI: funding-rate backtest
+│   └── data.py               # cached price history (Binance perp klines)
 ├── regime_backtest.py # CLI: regime-switching backtest
 ├── tools/
 │   └── regime_sweep.py # parameter-sweep harness for the regime strategy
 ├── research/         # Jupyter notebooks
 ├── state/            # runtime strategy state (gitignored)
 ├── tests/
-└── main.py           # entry point (--strategy funding|regime [--paper])
+└── main.py           # entry point ([--paper])
 ```
 
 ## Writing a new strategy
@@ -276,7 +224,7 @@ class MyStrategy(Strategy):
             await asyncio.sleep(60)
 ```
 
-Wire it up in `main.py` alongside the existing strategies.
+Wire it up in `main.py` alongside the regime strategy.
 
 ## Risk management
 

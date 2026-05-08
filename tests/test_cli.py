@@ -1,24 +1,20 @@
-"""Tests for CLI entrypoints — regime_backtest.py and backtest.py.
+"""Tests for CLI entrypoint — regime_backtest.py.
 
-Network calls are mocked so tests run offline; we drive each main() through
-argparse + the engine layer to confirm the wiring is correct.
+Network calls are mocked so tests run offline; we drive main() through argparse
+and the engine layer to confirm the wiring is correct.
 """
 from __future__ import annotations
 
 import csv
 import importlib
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
-import backtest as bt_cli
 import regime_backtest as rb_cli
-from backtesting.engine import BacktestResult, Trade
 from backtesting.regime_engine import RegimeBacktestResult, RegimeTrade
-from strategies.configs import FundingConfig, RegimeSwitchingConfig
+from strategies.configs import RegimeSwitchingConfig
 
 
 def _t(h: int) -> datetime:
@@ -40,25 +36,9 @@ def test_regime_parse_date_invalid_format_raises():
         rb_cli.parse_date("03/15/2024")
 
 
-def test_funding_parse_date():
-    d = bt_cli.parse_date("2025-12-31")
-    assert d == datetime(2025, 12, 31, tzinfo=timezone.utc)
-
-
 # --------------------------------------------------------------------------- #
 #  save_trades helpers                                                         #
 # --------------------------------------------------------------------------- #
-
-
-def _funding_result_with_trade() -> BacktestResult:
-    trade = Trade(
-        entry_time=_t(0), exit_time=_t(8), side="short",
-        entry_price=100.0, exit_price=99.0, position_size_usd=100.0,
-        funding_collected=0.5, exit_reason="funding_normalised",
-    )
-    eq = pd.Series([0.0, 0.5], index=pd.DatetimeIndex([_t(0), _t(8)]))
-    return BacktestResult(trades=[trade], equity_curve=eq, config=FundingConfig(),
-                          coin="BTC", start=_t(0), end=_t(8))
 
 
 def _regime_result_with_trade() -> RegimeBacktestResult:
@@ -74,18 +54,6 @@ def _regime_result_with_trade() -> RegimeBacktestResult:
         config=RegimeSwitchingConfig(),
         coin="BTC", start=_t(0), end=_t(20), n_refits=1,
     )
-
-
-def test_funding_save_trades_writes_csv(tmp_path):
-    out = tmp_path / "trades.csv"
-    bt_cli.save_trades(_funding_result_with_trade(), out)
-    assert out.exists()
-    rows = list(csv.DictReader(out.open()))
-    assert len(rows) == 1
-    assert rows[0]["side"] == "short"
-    assert rows[0]["exit_reason"] == "funding_normalised"
-    assert {"entry_time", "exit_time", "side", "entry_price", "funding_collected",
-            "price_pnl", "total_pnl", "exit_reason"} <= set(rows[0].keys())
 
 
 def test_regime_save_trades_writes_csv(tmp_path):
@@ -113,11 +81,6 @@ def test_regime_save_trades_creates_parent_dir(tmp_path):
 def test_regime_setup_logging_idempotent():
     rb_cli.setup_logging()
     rb_cli.setup_logging()   # second call must not crash
-
-
-def test_funding_setup_logging_idempotent():
-    bt_cli.setup_logging()
-    bt_cli.setup_logging()
 
 
 # --------------------------------------------------------------------------- #
@@ -208,49 +171,7 @@ def test_regime_cli_save_trades_flag(monkeypatch, tmp_path):
     assert expected.exists()
 
 
-# --------------------------------------------------------------------------- #
-#  Funding CLI main()                                                          #
-# --------------------------------------------------------------------------- #
-
-
-def test_funding_cli_main_runs_with_defaults(monkeypatch, capsys):
-    monkeypatch.setattr(bt_cli, "fetch_funding_history",
-                         lambda *a, **kw: pd.DataFrame({
-                             "timestamp": pd.to_datetime([_t(0)], utc=True),
-                             "funding_rate": [0.0001],
-                         }))
-    monkeypatch.setattr(bt_cli, "fetch_price_history",
-                         lambda *a, **kw: _make_synthetic_prices(n=24))
-    monkeypatch.setattr(bt_cli, "run_backtest",
-                         lambda *a, **kw: _funding_result_with_trade())
-    monkeypatch.setattr("sys.argv", ["backtest.py", "--coin", "BTC"])
-
-    bt_cli.main()
-    out = capsys.readouterr().out
-    assert "Funding Rate Backtest" in out
-
-
-def test_funding_cli_sweep_entry(monkeypatch, capsys):
-    """--sweep-entry runs the threshold grid and prints a table."""
-    monkeypatch.setattr(bt_cli, "fetch_funding_history",
-                         lambda *a, **kw: pd.DataFrame({
-                             "timestamp": pd.to_datetime([_t(0)], utc=True),
-                             "funding_rate": [0.0001],
-                         }))
-    monkeypatch.setattr(bt_cli, "fetch_price_history",
-                         lambda *a, **kw: _make_synthetic_prices(n=24))
-    monkeypatch.setattr(bt_cli, "run_backtest",
-                         lambda *a, **kw: _funding_result_with_trade())
-    monkeypatch.setattr("sys.argv", ["backtest.py", "--coin", "BTC", "--sweep-entry"])
-
-    bt_cli.main()
-    out = capsys.readouterr().out
-    assert "Entry/hr" in out
-
-
 def test_module_can_be_imported_directly():
-    """The CLI scripts must be importable as modules without executing main()."""
+    """The CLI script must be importable as a module without executing main()."""
     importlib.reload(rb_cli)
-    importlib.reload(bt_cli)
     assert hasattr(rb_cli, "main")
-    assert hasattr(bt_cli, "main")

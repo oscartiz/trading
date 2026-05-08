@@ -14,44 +14,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
-from backtesting.charts import plot_results
-from backtesting.engine import BacktestResult, Trade
 from backtesting.regime_charts import plot_regime_results
 from backtesting.regime_engine import RegimeBacktestResult, RegimeTrade
-from strategies.configs import FundingConfig, RegimeSwitchingConfig
+from strategies.configs import RegimeSwitchingConfig
 
 from tests.conftest import build_prices
 
 
 def _t(h: int) -> datetime:
     return datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(hours=h)
-
-
-def _funding_df() -> pd.DataFrame:
-    return pd.DataFrame({
-        "timestamp": pd.to_datetime([_t(0), _t(8), _t(16)], utc=True),
-        "funding_rate": [0.0005, 0.00005, -0.0001],
-    })
-
-
-def _funding_result() -> BacktestResult:
-    trades = [
-        Trade(entry_time=_t(0), exit_time=_t(8), side="short",
-              entry_price=100.0, exit_price=99.0, position_size_usd=100.0,
-              funding_collected=0.4, exit_reason="funding_normalised"),
-    ]
-    equity = pd.Series(
-        [0.0, 0.5, 1.0, 1.4, 1.4, 1.4, 1.4, 1.4],
-        index=pd.DatetimeIndex([_t(i) for i in range(8)]),
-        name="pnl",
-    )
-    return BacktestResult(
-        trades=trades, equity_curve=equity,
-        config=FundingConfig(),
-        coin="BTC", start=_t(0), end=_t(8),
-    )
 
 
 def _regime_result() -> RegimeBacktestResult:
@@ -79,17 +51,6 @@ def _regime_result() -> RegimeBacktestResult:
         config=RegimeSwitchingConfig(),
         coin="BTC", start=_t(0), end=_t(n - 1), n_refits=2,
     )
-
-
-def test_plot_results_funding_smoke(tmp_path: Path):
-    result = _funding_result()
-    prices = build_prices([100.0, 99.5, 99.0, 99.0, 99.0, 99.5, 99.0, 98.5],
-                          start=_t(0))
-    save_path = tmp_path / "funding.png"
-    out = plot_results(result, prices, _funding_df(), save_path=save_path, show=False)
-    assert out == save_path
-    assert save_path.exists()
-    assert save_path.stat().st_size > 1000   # non-empty PNG
 
 
 def test_plot_regime_results_smoke(tmp_path: Path):

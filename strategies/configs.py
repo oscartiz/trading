@@ -3,22 +3,6 @@ from dataclasses import dataclass
 
 
 @dataclass
-class FundingConfig:
-    # Entry: only trade when annualised rate exceeds this (0.02%/hr = ~175%/yr)
-    entry_threshold: float = 0.0002
-    # Exit: close when rate drops below this (0.005%/hr — no longer worth holding)
-    exit_threshold: float = 0.00005
-    # Hard stop: close if position moves this much against us
-    stop_loss_pct: float = 0.02
-    # Hard time cap — never hold longer than this regardless of funding
-    max_hold_hours: int = 48
-    # Notional size in USD — kept small and conservative
-    position_size_usd: float = 50.0
-    # How often to poll the REST API (live only)
-    poll_interval_seconds: int = 600
-
-
-@dataclass
 class RegimeSwitchingConfig:
     """Settings for the 3-state regime-switching strategy.
 

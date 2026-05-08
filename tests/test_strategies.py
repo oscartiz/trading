@@ -1,8 +1,8 @@
 """Tests for live strategy decision logic with the execution layer mocked.
 
-Both FundingRateStrategy and RegimeSwitchingStrategy are tested by driving
-their internal _check_entry / _maybe_exit / _maybe_enter methods directly,
-or by stepping _tick() against a controlled FakeOrderManager.
+The RegimeSwitchingStrategy is tested by driving its internal
+_maybe_enter / _maybe_exit methods directly, or by stepping _tick() against a
+controlled FakeOrderManager.
 
 These tests are critical because they cover the exact code path that fires
 real market orders in production — any regression here is real money on the line.
@@ -10,15 +10,12 @@ real market orders in production — any regression here is real money on the li
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import pytest
 
 from execution import Side
 from risk import RiskConfig, RiskManager
-from strategies.configs import FundingConfig, RegimeSwitchingConfig
-from strategies.funding_rate import FundingRateStrategy
+from strategies.configs import RegimeSwitchingConfig
 from strategies.regime import Regime, RegimeSnapshot
 from strategies.regime_switching import RegimeSwitchingStrategy
 
@@ -28,17 +25,6 @@ from tests.conftest import FakeInfo, FakeOrderManager
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #
 # --------------------------------------------------------------------------- #
-
-
-def _make_funding(funding_rate: float = 0.0,
-                  mid: float = 100.0,
-                  cfg_overrides: dict | None = None) -> tuple[FundingRateStrategy, FakeOrderManager]:
-    info = FakeInfo(funding_rate=funding_rate, mid=mid)
-    om = FakeOrderManager(info=info)
-    risk = RiskManager(RiskConfig(max_order_usd=10_000, max_position_usd=10_000, max_drawdown_pct=1.0))
-    cfg = FundingConfig(**(cfg_overrides or {}))
-    strat = FundingRateStrategy("BTC", om, risk, cfg)  # type: ignore[arg-type]
-    return strat, om
 
 
 def _make_regime(cfg_overrides: dict | None = None) -> tuple[RegimeSwitchingStrategy, FakeOrderManager]:
@@ -62,104 +48,6 @@ def _snap(p_bear: float, p_chop: float, p_bull: float, er: float = 0.0) -> Regim
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-# --------------------------------------------------------------------------- #
-#  FundingRateStrategy                                                         #
-# --------------------------------------------------------------------------- #
-
-
-def test_funding_enters_short_on_high_positive_funding():
-    strat, om = _make_funding(funding_rate=0.0005, cfg_overrides={"entry_threshold": 0.0002})
-    _run(strat._check_entry(0.0005, 100.0))
-    assert strat._in_position is True
-    assert strat._position_side == Side.SELL
-    assert len(om.orders) == 1
-    assert om.orders[0].side == Side.SELL
-    # FundingConfig default position_size_usd=50, mid=100 → size 0.5
-    assert om.orders[0].size == pytest.approx(0.5)
-
-
-def test_funding_enters_long_on_high_negative_funding():
-    strat, _om = _make_funding(funding_rate=-0.0005, cfg_overrides={"entry_threshold": 0.0002})
-    _run(strat._check_entry(-0.0005, 100.0))
-    assert strat._in_position is True
-    assert strat._position_side == Side.BUY
-
-
-def test_funding_skips_entry_below_threshold():
-    strat, om = _make_funding(cfg_overrides={"entry_threshold": 0.0002})
-    _run(strat._check_entry(0.0001, 100.0))   # below threshold
-    assert strat._in_position is False
-    assert om.orders == []
-
-
-def test_funding_exit_on_normalised_rate():
-    strat, _om = _make_funding(cfg_overrides={"entry_threshold": 0.0002, "exit_threshold": 0.00005})
-    # Manually open a short.
-    strat._in_position = True
-    strat._position_side = Side.SELL
-    strat._entry_price = 100.0
-    strat._entry_time = datetime.now(timezone.utc)
-    strat.orders.position = {"szi": "1.0", "coin": "BTC"}
-
-    _run(strat._check_exit(0.000001, 100.0))   # below exit_threshold
-
-    assert strat._in_position is False
-
-
-def test_funding_exit_on_flipped_funding():
-    strat, _om = _make_funding(cfg_overrides={"entry_threshold": 0.0002, "exit_threshold": 0.0})
-    strat._in_position = True
-    strat._position_side = Side.SELL  # short receives positive funding
-    strat._entry_price = 100.0
-    strat._entry_time = datetime.now(timezone.utc)
-    strat.orders.position = {"szi": "1.0", "coin": "BTC"}
-
-    _run(strat._check_exit(-0.0005, 100.0))    # funding flipped negative
-
-    assert strat._in_position is False
-
-
-def test_funding_stop_loss_long():
-    """Long position with adverse 3% move should hit a 2% stop."""
-    strat, _om = _make_funding(cfg_overrides={"stop_loss_pct": 0.02, "exit_threshold": 0.0})
-    strat._in_position = True
-    strat._position_side = Side.BUY
-    strat._entry_price = 100.0
-    strat._entry_time = datetime.now(timezone.utc)
-    strat.orders.position = {"szi": "1.0", "coin": "BTC"}
-
-    _run(strat._check_exit(-0.0005, 97.0))     # mid=97 → -3% on long
-
-    assert strat._in_position is False
-
-
-def test_funding_max_hold_force_close():
-    strat, _om = _make_funding(cfg_overrides={"max_hold_hours": 1, "exit_threshold": 0.0})
-    strat._in_position = True
-    strat._position_side = Side.SELL
-    strat._entry_price = 100.0
-    # Entry was 2 hours ago.
-    strat._entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
-    strat.orders.position = {"szi": "1.0", "coin": "BTC"}
-
-    _run(strat._check_exit(0.0005, 100.0))     # funding still strong
-
-    assert strat._in_position is False
-
-
-def test_funding_no_double_entry():
-    """If already in position, _check_entry must not open a second order."""
-    strat, om = _make_funding(funding_rate=0.0005, cfg_overrides={"entry_threshold": 0.0002})
-    # Pretend we're already in.
-    strat._in_position = True
-    strat._position_side = Side.SELL
-
-    # _tick branches on _in_position; calling _check_entry directly is the "wrong path"
-    # but it should still not open a new order through the public _tick contract.
-    _run(strat._tick())
-    assert len(om.orders) == 0
 
 
 # --------------------------------------------------------------------------- #

@@ -1,7 +1,7 @@
-"""Download and cache historical funding rates and OHLCV data.
+"""Download and cache historical price data for backtesting.
 
-Funding rates: Hyperliquid (full history available).
-Price data: Binance perp klines (unlimited history, no key needed) — HL only keeps ~60 days.
+Price data: Binance perp klines (unlimited history, no key needed) — Hyperliquid
+only retains a short rolling window, so we use Binance for historical bars.
 """
 from datetime import datetime
 from pathlib import Path
@@ -9,13 +9,9 @@ from time import sleep
 
 import pandas as pd
 import requests
-from hyperliquid.info import Info
 from loguru import logger
 
 CACHE_DIR = Path("data/cache")
-_MAINNET_URL = "https://api.hyperliquid.xyz"
-_TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
-_HL_BATCH_MS = 90 * 24 * 3_600_000   # 90-day batches for Hyperliquid
 _BN_LIMIT = 1000                       # Binance max candles per request
 _MAX_ITERS = 500
 
@@ -38,56 +34,9 @@ _BINANCE_SYMBOL: dict[str, str] = {
 # Binance interval strings match HL (1h, 4h, 1d, etc.)
 
 
-def _info(testnet: bool = False) -> Info:
-    return Info(_TESTNET_URL if testnet else _MAINNET_URL, skip_ws=True)
-
-
 def _cache_path(prefix: str, coin: str, start: datetime, end: datetime, extra: str = "") -> Path:
     name = f"{prefix}_{coin}{extra}_{int(start.timestamp())}_{int(end.timestamp())}.parquet"
     return CACHE_DIR / name
-
-
-def fetch_funding_history(
-    coin: str,
-    start: datetime,
-    end: datetime,
-    testnet: bool = False,
-    force: bool = False,
-) -> pd.DataFrame:
-    """Return DataFrame[timestamp (UTC), funding_rate] at 8-hour settlement intervals."""
-    path = _cache_path("funding", coin, start, end)
-    if path.exists() and not force:
-        logger.debug("Loading cached funding history from {}", path)
-        return pd.read_parquet(path)
-
-    logger.info("Fetching funding history for {} ({} → {})", coin, start.date(), end.date())
-    info = _info(testnet)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-    records: list[dict] = []
-
-    cursor = start_ms
-    for _ in range(_MAX_ITERS):
-        if cursor >= end_ms:
-            break
-        batch = info.funding_history(coin, cursor, min(cursor + _HL_BATCH_MS, end_ms))
-        if not batch:
-            break
-        records.extend(batch)
-        last_ts = int(batch[-1]["time"])
-        if last_ts <= cursor:
-            break
-        cursor = last_ts + 1
-
-    df = pd.DataFrame(records)
-    df["timestamp"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-    df["funding_rate"] = df["fundingRate"].astype(float)
-    df = df[["timestamp", "funding_rate"]].sort_values("timestamp").reset_index(drop=True)
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path)
-    logger.info("Fetched {} funding records", len(df))
-    return df
 
 
 def fetch_price_history(
