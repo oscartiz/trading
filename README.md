@@ -81,6 +81,12 @@ HL_PRIVATE_KEY=0x...          # wallet private key
 HL_ACCOUNT_ADDRESS=0x...      # wallet address
 HL_TESTNET=true               # set false for mainnet
 LOG_LEVEL=INFO
+
+# Operational extras — all optional, leave unset to disable.
+ALERT_WEBHOOK_URL=            # Discord-compatible webhook for entries/exits/halts
+ALERT_MIN_LEVEL=WARNING       # min loguru level for the webhook sink
+HEARTBEAT_URL=                # healthchecks.io / uptime-kuma push URL
+HEARTBEAT_INTERVAL_SECONDS=300
 ```
 
 > **Never commit `.env`.** It is in `.gitignore`.

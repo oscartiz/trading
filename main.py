@@ -32,10 +32,12 @@ def setup_logging(notifier: Notifier) -> None:
 
 def build_strategy(
     coin: str, order_manager, risk: RiskManager, notifier: Notifier,
+    equity_source,
 ) -> RegimeSwitchingStrategy:
     return RegimeSwitchingStrategy(
         coin=coin, order_manager=order_manager, risk=risk,
         config=RegimeSwitchingConfig(), notifier=notifier,
+        equity_source=equity_source,
     )
 
 
@@ -71,7 +73,7 @@ async def main() -> None:
         order_manager = OrderManager(info, exchange)
         get_equity = make_live_equity_source(info, settings.account_address)
 
-    strategy = build_strategy(args.coin, order_manager, risk, notifier)
+    strategy = build_strategy(args.coin, order_manager, risk, notifier, get_equity)
 
     heartbeat_url = os.getenv("HEARTBEAT_URL") or None
     heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "300"))

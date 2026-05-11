@@ -18,6 +18,10 @@ class RegimeSwitchingConfig:
     hmm_max_iter: int = 100
     hmm_tol: float = 1e-4
     hmm_random_state: int = 0
+    # Minimum acceptable bull-µ minus bear-µ. Below this the regimes have
+    # collapsed onto each other and gates downstream will pass junk; we warn
+    # via the notifier so the operator can investigate.
+    min_regime_separation: float = 1e-4
 
     # ---- entry ----
     # Take a long when P(bull) ≥ this; short when P(bear) ≥ this.
@@ -69,8 +73,14 @@ class RegimeSwitchingConfig:
     signal_mode: str = "smoothed"
 
     # ---- sizing ----
-    # Notional USD when fully sized.
+    # Notional USD when fully sized. Used as a fallback when position_size_pct
+    # is None (e.g. in backtests, which don't have a live equity series).
     position_size_usd: float = 100.0
+    # Optional: size as a fraction of live equity. When set, the strategy reads
+    # equity via its injected equity_source and uses notional = equity * pct.
+    # Falls back to position_size_usd when the source is unavailable (paper or
+    # backtest contexts without an equity feed).
+    position_size_pct: float | None = None
     # Scale notional by P(target regime); below this floor we skip.
     min_size_scale: float = 0.5
     leverage: int = 1

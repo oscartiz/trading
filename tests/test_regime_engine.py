@@ -51,6 +51,9 @@ class StubClassifier:
         self.fit_calls = 0
         self.snapshot_calls = 0
         self.predict_calls = 0
+        # Health surface read by RegimeSwitchingStrategy._refit.
+        self.log_likelihood: float | None = -1.0
+        self.n_iter_run: int = 1
         # Live strategy's _refit reads classifier.hmm.n_states for a sanity check.
         from types import SimpleNamespace
         self.hmm = SimpleNamespace(n_states=3)

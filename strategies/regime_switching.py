@@ -16,8 +16,10 @@ Workflow:
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from datetime import datetime, timezone
+from typing import Callable
 
 import numpy as np
 from loguru import logger
@@ -41,6 +43,7 @@ class RegimeSwitchingStrategy(Strategy):
         state_store: StateStore | None = None,
         journal: TradeJournal | None = None,
         notifier: Notifier | None = None,
+        equity_source: Callable[[], float] | None = None,
     ) -> None:
         super().__init__(coin, order_manager, risk)
         self.cfg = config or RegimeSwitchingConfig()
@@ -69,6 +72,8 @@ class RegimeSwitchingStrategy(Strategy):
         self._state = state_store or StateStore(self.name(), coin)
         self._journal = journal or TradeJournal(coin)
         self._notifier = notifier or Notifier()
+        self._equity_source = equity_source
+        self._last_fit_health: dict | None = None
         self._load_state()
 
     def name(self) -> str:
@@ -85,15 +90,19 @@ class RegimeSwitchingStrategy(Strategy):
         short_conf = (self.cfg.entry_confirmation_bars_short
                       if self.cfg.entry_confirmation_bars_short is not None
                       else self.cfg.entry_confirmation_bars)
+        if self.cfg.position_size_pct is not None and self._equity_source is not None:
+            size_desc = f"{self.cfg.position_size_pct:.1%} of equity"
+        else:
+            size_desc = f"${self.cfg.position_size_usd}"
         logger.info(
             "{} | {} started | window={} bars refit_every={} entry_p≥{:.2f} exit_p<{:.2f} "
-            "confirm_long={} confirm_short={} cooldown={} stop={:.0%} tp={} max_hold={}b size=${}",
+            "confirm_long={} confirm_short={} cooldown={} stop={:.0%} tp={} max_hold={}b size={}",
             self.name(), self.coin, self.cfg.train_window_bars, self.cfg.refit_every_bars,
             self.cfg.entry_proba, self.cfg.exit_proba,
             self.cfg.entry_confirmation_bars, short_conf, self.cfg.same_regime_cooldown_bars,
             self.cfg.stop_loss_pct,
             f"{self.cfg.take_profit_pct:.0%}" if self.cfg.take_profit_pct else "off",
-            self.cfg.max_hold_bars, self.cfg.position_size_usd,
+            self.cfg.max_hold_bars, size_desc,
         )
 
         while True:
@@ -181,13 +190,45 @@ class RegimeSwitchingStrategy(Strategy):
         if returns.size < self._classifier.hmm.n_states * 5:
             logger.warning("{} | not enough returns to fit HMM ({})", self.coin, returns.size)
             return
-        self._classifier.fit(returns)
+        t0 = time.perf_counter()
+        try:
+            self._classifier.fit(returns)
+        except Exception as exc:
+            # logger.error routes through the notifier sink when alerting is on.
+            # Previous classifier params (if any) stay in place, so inference
+            # keeps working on stale-but-known parameters until the next refit.
+            logger.error("{} | HMM refit failed: {}", self.coin, exc)
+            self._last_fit_health = {
+                "ok": False, "error": str(exc), "n_returns": int(returns.size),
+            }
+            return
+        fit_ms = (time.perf_counter() - t0) * 1000.0
         self._bars_since_fit = 0
         means = self._classifier.state_means
+        separation = float(means[2] - means[0])
+        self._last_fit_health = {
+            "ok": True,
+            "log_likelihood": self._classifier.log_likelihood,
+            "n_iter": self._classifier.n_iter_run,
+            "separation": separation,
+            "fit_ms": fit_ms,
+            "bear_mu": float(means[0]),
+            "chop_mu": float(means[1]),
+            "bull_mu": float(means[2]),
+            "n_returns": int(returns.size),
+        }
         logger.info(
-            "{} | HMM refit | bear_µ={:+.5f} chop_µ={:+.5f} bull_µ={:+.5f} (n={})",
-            self.coin, means[0], means[1], means[2], returns.size,
+            "{} | HMM refit | bear_µ={:+.5f} chop_µ={:+.5f} bull_µ={:+.5f} "
+            "sep={:.5f} ll={:.1f} iters={} fit={:.1f}ms (n={})",
+            self.coin, means[0], means[1], means[2],
+            separation, self._classifier.log_likelihood or 0.0,
+            self._classifier.n_iter_run, fit_ms, returns.size,
         )
+        if separation < self.cfg.min_regime_separation:
+            logger.warning(
+                "{} | HMM regime separation degraded: bull-bear={:.5f} < threshold={:.5f}",
+                self.coin, separation, self.cfg.min_regime_separation,
+            )
 
     # ------------------------------------------------------------------ #
     #  Entry / exit                                                        #
@@ -208,6 +249,27 @@ class RegimeSwitchingStrategy(Strategy):
         if p_bear >= self.cfg.entry_proba and snap.expected_return <= -self.cfg.min_expected_return_per_bar:
             return Regime.BEAR
         return None
+
+    def _resolve_base_notional(self) -> float:
+        """Pick the per-trade notional before probability scaling.
+
+        When ``position_size_pct`` is set AND a live equity source is wired,
+        size from equity. Otherwise fall back to the fixed-USD knob — which is
+        what backtests and paper-without-equity-feed use.
+        """
+        pct = self.cfg.position_size_pct
+        if pct is not None and self._equity_source is not None:
+            try:
+                equity = float(self._equity_source())
+            except Exception as exc:
+                logger.warning(
+                    "{} | equity_source raised, falling back to fixed USD: {}",
+                    self.coin, exc,
+                )
+                return self.cfg.position_size_usd
+            if equity > 0:
+                return equity * pct
+        return self.cfg.position_size_usd
 
     def _update_streak(self, candidate: Regime | None) -> None:
         if candidate is not None and candidate == self._streak_target:
@@ -242,7 +304,8 @@ class RegimeSwitchingStrategy(Strategy):
         side: Side = Side.BUY if target == Regime.BULL else Side.SELL
         target_proba: float = float(snap.proba[int(target)])
         scale = max(target_proba, self.cfg.min_size_scale)
-        notional = self.cfg.position_size_usd * scale
+        base_notional = self._resolve_base_notional()
+        notional = base_notional * scale
         size = round(notional / mid, 6)
 
         if not self.risk.check_order(side, notional, 0.0):

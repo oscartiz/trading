@@ -116,6 +116,16 @@ class RegimeClassifier:
             raise RuntimeError("Classifier is not fitted yet.")
         return params.trans_mat
 
+    @property
+    def log_likelihood(self) -> float | None:
+        """Log-likelihood of the most recent fit (None before fit())."""
+        return self.hmm.log_likelihood_
+
+    @property
+    def n_iter_run(self) -> int:
+        """EM iterations the most recent fit needed before convergence/cap."""
+        return self.hmm.n_iter_run_
+
 
 def log_returns_from_close(close: np.ndarray) -> np.ndarray:
     """log(p_t / p_{t-1}) — the canonical input for the regime model."""
