@@ -66,7 +66,10 @@ class PaperOrderManager:
             "paper | {} | FILLED {} size={} @ {:.4f} (mid={:.4f}, fee=${:.4f})",
             coin, side, size, fill_price, mid, fee,
         )
-        return OrderResult(success=True, order_id=oid, raw={"paper": True})
+        return OrderResult(
+            success=True, order_id=oid, raw={"paper": True},
+            fill_price=fill_price, fee=fee,
+        )
 
     def limit_order(
         self, coin: str, side: Side, size: float, price: float, reduce_only: bool = False,
@@ -80,7 +83,10 @@ class PaperOrderManager:
             "paper | {} | LIMIT FILLED {} size={} @ {:.4f} (fee=${:.4f})",
             coin, side, size, price, fee,
         )
-        return OrderResult(success=True, order_id=oid, raw={"paper": True})
+        return OrderResult(
+            success=True, order_id=oid, raw={"paper": True},
+            fill_price=price, fee=fee,
+        )
 
     def cancel_order(self, coin: str, order_id: int) -> OrderResult:
         return OrderResult(success=True, order_id=order_id, raw={"paper": True})

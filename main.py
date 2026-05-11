@@ -1,6 +1,7 @@
 """Entry point: wires strategy → orders → risk."""
 import argparse
 import asyncio
+import os
 import sys
 
 from loguru import logger
@@ -8,28 +9,39 @@ from loguru import logger
 from config import settings
 from execution import OrderManager, PaperOrderManager, build_clients
 from risk import RiskConfig, RiskManager
-from runtime import equity_watchdog, make_live_equity_source
+from runtime import (
+    Notifier,
+    equity_watchdog,
+    heartbeat_loop,
+    make_live_equity_source,
+    make_notifier_from_env,
+)
 from strategies.configs import RegimeSwitchingConfig
 from strategies.regime_switching import RegimeSwitchingStrategy
 
 
-def setup_logging() -> None:
+def setup_logging(notifier: Notifier) -> None:
     import os
     os.makedirs("logs", exist_ok=True)
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level, colorize=True)
     logger.add("logs/trading.log", rotation="100 MB", retention="30 days", level="DEBUG")
+    if notifier.enabled:
+        logger.add(notifier.sink, level=notifier.min_level)
 
 
-def build_strategy(coin: str, order_manager, risk: RiskManager) -> RegimeSwitchingStrategy:
+def build_strategy(
+    coin: str, order_manager, risk: RiskManager, notifier: Notifier,
+) -> RegimeSwitchingStrategy:
     return RegimeSwitchingStrategy(
         coin=coin, order_manager=order_manager, risk=risk,
-        config=RegimeSwitchingConfig(),
+        config=RegimeSwitchingConfig(), notifier=notifier,
     )
 
 
 async def main() -> None:
-    setup_logging()
+    notifier = make_notifier_from_env()
+    setup_logging(notifier)
 
     parser = argparse.ArgumentParser(description="Run the regime-switching strategy live.")
     parser.add_argument("--coin", default="BTC")
@@ -40,8 +52,8 @@ async def main() -> None:
     args = parser.parse_args()
 
     logger.info(
-        "Starting | coin={} testnet={} paper={}",
-        args.coin, settings.testnet, args.paper,
+        "Starting | coin={} testnet={} paper={} alerts={}",
+        args.coin, settings.testnet, args.paper, notifier.enabled,
     )
 
     info, exchange = build_clients(read_only=args.paper)
@@ -59,11 +71,15 @@ async def main() -> None:
         order_manager = OrderManager(info, exchange)
         get_equity = make_live_equity_source(info, settings.account_address)
 
-    strategy = build_strategy(args.coin, order_manager, risk)
+    strategy = build_strategy(args.coin, order_manager, risk, notifier)
+
+    heartbeat_url = os.getenv("HEARTBEAT_URL") or None
+    heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "300"))
 
     await asyncio.gather(
         strategy.run(),
         equity_watchdog(get_equity, risk, poll_seconds=60.0),
+        heartbeat_loop(heartbeat_url, interval_seconds=heartbeat_interval),
     )
 
 

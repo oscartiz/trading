@@ -17,6 +17,8 @@ class OrderResult:
     order_id: int | None = None
     error: str | None = None
     raw: dict = field(default_factory=dict)
+    fill_price: float | None = None
+    fee: float | None = None
 
 
 class OrderManager:
@@ -66,6 +68,15 @@ class OrderManager:
             return OrderResult(success=False, error=error, raw=raw)
         data = raw.get("response", {}).get("data", {})
         statuses = data.get("statuses", [{}])
-        oid = statuses[0].get("resting", {}).get("oid") or statuses[0].get("filled", {}).get("oid")
+        first = statuses[0]
+        filled = first.get("filled") or {}
+        resting = first.get("resting") or {}
+        oid = resting.get("oid") or filled.get("oid")
+        fill_price: float | None = None
+        if filled.get("avgPx") is not None:
+            try:
+                fill_price = float(filled["avgPx"])
+            except (TypeError, ValueError):
+                fill_price = None
         logger.info("Order ok | oid={} data={}", oid, data)
-        return OrderResult(success=True, order_id=oid, raw=raw)
+        return OrderResult(success=True, order_id=oid, raw=raw, fill_price=fill_price)

@@ -24,7 +24,7 @@ from loguru import logger
 
 from execution import OrderManager, Side
 from risk import RiskManager
-from runtime import StateStore
+from runtime import Notifier, StateStore, TradeJournal
 
 from .base import Strategy
 from .configs import RegimeSwitchingConfig
@@ -39,6 +39,8 @@ class RegimeSwitchingStrategy(Strategy):
         risk: RiskManager,
         config: RegimeSwitchingConfig | None = None,
         state_store: StateStore | None = None,
+        journal: TradeJournal | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         super().__init__(coin, order_manager, risk)
         self.cfg = config or RegimeSwitchingConfig()
@@ -65,6 +67,8 @@ class RegimeSwitchingStrategy(Strategy):
         self._streak_bars: int = 0
 
         self._state = state_store or StateStore(self.name(), coin)
+        self._journal = journal or TradeJournal(coin)
+        self._notifier = notifier or Notifier()
         self._load_state()
 
     def name(self) -> str:
@@ -249,6 +253,21 @@ class RegimeSwitchingStrategy(Strategy):
             self.coin, side, target.label, target_proba, notional, size, mid,
         )
         result = self.orders.market_order(self.coin, side, size)
+        self._journal.record({
+            "coin": self.coin,
+            "event": "entry",
+            "side": side.value,
+            "size": size,
+            "intended_price": mid,
+            "fill_price": result.fill_price,
+            "fee": result.fee,
+            "notional": notional,
+            "regime": target.label,
+            "regime_proba": target_proba,
+            "order_id": result.order_id,
+            "success": result.success,
+            "error": result.error,
+        })
         if result.success:
             self._in_position = True
             self._entry_price = mid
@@ -257,6 +276,11 @@ class RegimeSwitchingStrategy(Strategy):
             self._target_regime = target
             self.risk.register_order()
             self._save_state()
+            self._notifier.send(
+                f"{self.coin} entered {side.value} {target.label} "
+                f"p={target_proba:.2f} @ {mid:.2f} size={size}",
+                level="ENTRY",
+            )
 
     async def _maybe_exit(self, snap, viterbi_label: Regime | None, mid: float) -> None:
         reasons: list[str] = []
@@ -296,9 +320,13 @@ class RegimeSwitchingStrategy(Strategy):
             return
 
         logger.info("{} | exiting | reasons: {}", self.coin, " | ".join(reasons))
-        await self._close_position()
+        await self._close_position(exit_reason=" | ".join(reasons), intended_price=mid)
 
-    async def _close_position(self) -> None:
+    async def _close_position(
+        self,
+        exit_reason: str = "manual",
+        intended_price: float | None = None,
+    ) -> None:
         pos = self.orders.get_position(self.coin)
         if not pos or float(pos.get("szi", 0)) == 0:
             logger.warning("{} | tried to close but no open position found", self.coin)
@@ -306,8 +334,34 @@ class RegimeSwitchingStrategy(Strategy):
             return
         size = abs(float(pos["szi"]))
         close_side = Side.SELL if self._position_side == Side.BUY else Side.BUY
+        entry_price = self._entry_price
         result = self.orders.market_order(self.coin, close_side, size)
+        fill = result.fill_price if result.fill_price is not None else intended_price
+        pnl_usd: float | None = None
+        if entry_price is not None and fill is not None and self._position_side is not None:
+            direction = 1.0 if self._position_side == Side.BUY else -1.0
+            pnl_usd = direction * (fill - entry_price) * size
+        self._journal.record({
+            "coin": self.coin,
+            "event": "exit",
+            "side": close_side.value,
+            "size": size,
+            "intended_price": intended_price,
+            "fill_price": result.fill_price,
+            "fee": result.fee,
+            "entry_price": entry_price,
+            "pnl_usd": pnl_usd,
+            "exit_reason": exit_reason,
+            "order_id": result.order_id,
+            "success": result.success,
+            "error": result.error,
+        })
         if result.success:
+            pnl_str = f" pnl=${pnl_usd:+.2f}" if pnl_usd is not None else ""
+            self._notifier.send(
+                f"{self.coin} exited @ {fill or 0:.2f}{pnl_str} ({exit_reason})",
+                level="EXIT",
+            )
             self._reset()
 
     def _reset(self) -> None:

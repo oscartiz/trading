@@ -178,7 +178,7 @@ rm state/risk_global.json
 ```
 trading/
 ├── config/           # env-based settings
-├── data/             # async WebSocket feed (trades + L2 book)
+├── data/             # cached Binance klines + generated charts
 ├── execution/
 │   ├── client.py             # Hyperliquid Info+Exchange clients
 │   ├── order_manager.py      # live order routing
@@ -186,14 +186,16 @@ trading/
 ├── risk/             # position limits, drawdown halt
 ├── runtime/
 │   ├── state.py              # JSON-sidecar state persistence
+│   ├── journal.py            # append-only fills journal (JSONL)
+│   ├── notify.py             # webhook alerting (Discord-compatible)
+│   ├── heartbeat.py          # liveness ping to healthchecks.io / uptime-kuma
 │   └── watchdog.py           # equity_watchdog + live equity source
 ├── strategies/
 │   ├── base.py               # abstract Strategy + startup reconciliation
 │   ├── regime_switching.py   # HMM-based 3-state regime strategy
 │   ├── regime.py             # 3-state classifier wrapping the HMM
 │   ├── hmm.py                # numpy-only Gaussian HMM
-│   ├── configs.py            # strategy parameter dataclass
-│   └── example_momentum.py   # stub example
+│   └── configs.py            # strategy parameter dataclass
 ├── backtesting/
 │   ├── regime_engine.py      # regime-switching backtest engine
 │   ├── regime_charts.py      # regime-switching chart
@@ -202,7 +204,7 @@ trading/
 ├── tools/
 │   └── regime_sweep.py # parameter-sweep harness for the regime strategy
 ├── research/         # Jupyter notebooks
-├── state/            # runtime strategy state (gitignored)
+├── state/            # runtime strategy state + fill journal (gitignored)
 ├── tests/
 └── main.py           # entry point ([--paper])
 ```

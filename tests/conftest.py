@@ -19,11 +19,14 @@ import pytest
 def isolate_state_dir(monkeypatch, tmp_path):
     """Redirect persistent strategy state into a per-test tmp dir.
 
-    Strategies write JSON sidecar files to `state/{name}_{coin}.json`. Without
-    this fixture, tests would share that directory and pollute each other.
+    Strategies write JSON sidecar files to `state/{name}_{coin}.json` and an
+    append-only journal to `state/fills_{coin}.jsonl`. Without this fixture,
+    tests would share those files and pollute each other.
     """
+    from runtime import journal as journal_mod
     from runtime import state as state_mod
     monkeypatch.setattr(state_mod, "DEFAULT_STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(journal_mod, "DEFAULT_STATE_DIR", tmp_path / "state")
 
 # ----- price-series builders ---------------------------------------------- #
 
@@ -96,6 +99,8 @@ class FakeOrderResult:
     order_id: int = 1
     error: str | None = None
     raw: dict = field(default_factory=dict)
+    fill_price: float | None = None
+    fee: float | None = None
 
 
 @dataclass
