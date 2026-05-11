@@ -10,6 +10,8 @@ venv/
 *.egg-info/
 research/*.ipynb_checkpoints/
 data/cache/
+data/trades_*.csv
+.DS_Store
 logs/
 state/
 ROADMAP.txt

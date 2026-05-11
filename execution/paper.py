@@ -16,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 
+from .fees import TAKER_FEE_RATE
 from .order_manager import OrderResult, Side
 
 
@@ -35,7 +36,7 @@ class PaperOrderManager:
         self,
         info: Any,
         starting_equity: float = 1_000.0,
-        fee_rate: float = 0.00035,
+        fee_rate: float = TAKER_FEE_RATE,
         slippage_bps: float = 1.0,
     ) -> None:
         self.info = info

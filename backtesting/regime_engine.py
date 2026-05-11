@@ -21,6 +21,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from execution import TAKER_FEE_RATE
 from strategies.configs import RegimeSwitchingConfig
 from strategies.regime import Regime, RegimeClassifier, log_returns_from_close
 
@@ -66,12 +67,24 @@ class RegimeBacktestResult:
     n_refits: int = 0
     debug: dict = field(default_factory=dict)
 
+    @property
+    def total_fees(self) -> float:
+        return sum(t.fees for t in self.trades)
+
+    @property
+    def gross_pnl(self) -> float:
+        return sum(t.price_pnl for t in self.trades)
+
+    @property
+    def net_pnl(self) -> float:
+        return sum(t.total_pnl for t in self.trades)
+
 
 def run_regime_backtest(
     prices_df: pd.DataFrame,
     coin: str,
     config: RegimeSwitchingConfig | None = None,
-    fee_rate: float = 0.00035,
+    fee_rate: float = TAKER_FEE_RATE,
 ) -> RegimeBacktestResult:
     cfg = config or RegimeSwitchingConfig()
     df = prices_df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
@@ -338,6 +351,8 @@ def regime_metrics(result: RegimeBacktestResult) -> dict:
         "longs": sides_count["long"],
         "shorts": sides_count["short"],
         "total_pnl_usd": round(sum(pnls), 4),
+        "gross_pnl_usd": round(result.gross_pnl, 4),
+        "total_fees_usd": round(result.total_fees, 4),
         "win_rate_pct": round(win_rate * 100, 1),
         "avg_pnl_per_trade_usd": round(sum(pnls) / n, 4),
         "best_trade_usd": round(max(pnls), 4),
@@ -376,7 +391,9 @@ def print_regime_metrics(result: RegimeBacktestResult) -> None:
     print(f"  Win rate     : {m['win_rate_pct']}%")
     print(f"  Avg hold     : {m['avg_hold_hours']}h")
     print()
-    print(f"  Total P&L    : ${m['total_pnl_usd']:+.4f}")
+    print(f"  Gross P&L    : ${m['gross_pnl_usd']:+.4f}")
+    print(f"  Fees paid    : ${m['total_fees_usd']:.4f}")
+    print(f"  Net P&L      : ${m['total_pnl_usd']:+.4f}")
     print(f"  Per trade    : ${m['avg_pnl_per_trade_usd']:+.4f}")
     print(f"  Best / Worst : ${m['best_trade_usd']:+.4f}  /  ${m['worst_trade_usd']:+.4f}")
     print()

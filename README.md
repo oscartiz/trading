@@ -249,6 +249,20 @@ cleanly via stop-loss / regime-change / time-cap.
 
 Defaults in `main.py` — adjust to match your account size.
 
+## Testing
+
+The suite covers the HMM math, regime classifier, backtest engine, live strategy
+plumbing (warm-up / poll / refit / enter / exit), risk manager (incl. halt-with-
+position contracts), state persistence, trade journal, alerting, heartbeat,
+fee accounting, indicators, and the offline tools (walk-forward sweep, gate
+calibration, parameter sweep).
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+# 221 passed
+```
+
 ## Disclaimer
 
 This is experimental software. Crypto perpetuals carry liquidation risk. Use testnet first, keep sizes small, and never risk more than you can afford to lose.
