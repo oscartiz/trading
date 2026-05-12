@@ -44,18 +44,97 @@ The out-of-sample stress test. BTC fell from $47k to $16k in 2022, with the Luna
 
 Iteration 3 looked great on 2024 (+$16, Sharpe 2.20) but produced exactly **one** trade on 2022 — a long, +$0.26 — confirming the gate was structurally long-only. Diagnostic showed bear regimes in BTC 2024 never sustained more than 4 consecutive bars passing the gate, while bull runs reached 17. Lowering only the short-side gate (8 → 3) preserved long-side quality and unlocked the short entries that make 2022 profitable.
 
+### Multi-coin walk-forward validation (2022–2025)
+
+Before committing to mainnet, the strategy was run across 7 coins × 4 years
+(392 trades total) under the current BTC-tuned defaults. The full table is
+checked in at [`data/walk_forward_2022-2025_7coins.txt`](data/walk_forward_2022-2025_7coins.txt).
+Headline per-coin totals:
+
+| Coin | Trades | Win % | Net P&L | Verdict at BTC defaults |
+|------|-------:|------:|--------:|-------------------------|
+| AVAX | 36 | 55.5 | **+$73.07** | works |
+| BTC  | 33 | 54.5 | **+$12.30** | works (barely) |
+| ETH  | 39 | 46.2 | −$45.64 | underperforms |
+| LINK | 34 | 53.0 | −$35.24 | underperforms |
+| SOL  | 71 | 45.1 | −$57.51 | broken on this gate |
+| BNB  | 91 | 41.8 | −$95.98 | broken on this gate |
+| DOGE | 88 | 44.3 | −$105.22 | broken on this gate |
+| **ALL** | **392** | **46.7** | **−$254.22** | mixed |
+
+**Reading this honestly:**
+
+- **BTC** is the only coin the strategy was tuned on, and it remains net
+  positive across the 4-year out-of-sample window — but barely, and with a
+  losing 2023 and 2024 sandwiched between profitable bookends.
+- **AVAX** is the only other coin that clears at the BTC defaults, which is
+  a happy surprise — but a single-coin happy surprise across 4 years isn't a
+  validated edge.
+- **ETH, LINK, SOL, BNB, DOGE** all lose at the BTC-tuned gate. The
+  spikier the asset's bear regimes, the worse the BTC-calibrated short
+  gate misfires. SOL is the most extreme: 61 of 71 trades are shorts, and
+  the strategy is essentially trying to short volatile chop.
+- **Conclusion**: the asymmetric gate works on BTC, generalises to AVAX,
+  and does not transfer to the rest of the basket without per-coin
+  calibration. The [`tools/calibrate_gates.py`](tools/calibrate_gates.py)
+  tool exists for exactly that purpose — see "Per-coin calibration" below.
+
 ### Caveats before deploying
 
-1. **Sample size.** 18 trades across two years is still small. Per-trade noise is meaningful and these defaults haven't been validated on ETH or 2023 BTC.
-2. **Drawdown.** A $100 position can lose $24 in mark-to-market before the regime exit fires. Size accordingly.
-3. **Asset-specific calibration.** The asymmetric short gate is calibrated to BTC's regime persistence. Other assets likely have different bull/bear asymmetry profiles and will need their own gate ratios.
+1. **Deploy on BTC only at first.** The defaults in `main.py` (BTC, $100
+   notional, $150 max position, 5% drawdown halt) are the only configuration
+   that has positive walk-forward evidence behind it. Other coins need
+   per-coin gate calibration *before* they go live.
+2. **Sample size.** Even on BTC, 33 trades across 4 years is modest. Per-trade
+   noise is meaningful and a losing year is well within the noise envelope.
+3. **Drawdown.** A $100 position can lose ~$24 in mark-to-market before the
+   regime exit fires (peak observed: −35% of position size in BTC 2024).
+   Size your `max_position_usd` accordingly.
+
+### Per-coin calibration
+
+Use `tools/calibrate_gates.py` to scan a coin's history and recommend
+`entry_confirmation_bars` / `entry_confirmation_bars_short` from its
+regime-streak distribution. Default quantile is 0.25 (permissive — admits
+the top ~75% of streaks); pass `--quantile 0.75` for a selective gate that
+matches the BTC defaults' quality bar.
+
+```bash
+python tools/calibrate_gates.py --coin BTC --quantile 0.75
+# RECOMMENDED: entry_confirmation_bars        = 9
+#              entry_confirmation_bars_short  = 2
+```
+
+For 2024–2026 BTC/ETH/SOL, the selective-quantile recommendations are 9/2,
+7/2, 7/2 — i.e. each coin wants its own per-asset values; inheriting BTC's
+6/3 across the basket is what produced the underperformance above.
+
+## Pre-mainnet checklist
+
+Before flipping `HL_TESTNET=false`:
+
+- [x] State persistence + startup reconciliation
+- [x] Drawdown halt + halt-with-open-position exit-path test
+- [x] Trade journal (append-only fills log at `state/fills_{coin}.jsonl`)
+- [x] Webhook alerting on entries / exits / halts / errors
+- [x] Heartbeat ping to an external watchdog
+- [x] HMM health metrics on every refit (separation, log-likelihood, fit ms)
+- [x] Equity-relative position sizing knob
+- [x] Walk-forward validation across coins and years
+- [x] Per-coin gate calibration tool
+- [ ] 2-week paper / testnet shakeout with alerting and heartbeat wired
+- [ ] Confirm the configured webhook URL and heartbeat URL are reachable
+      from the host you'll actually run on
+
+The two open boxes are operational, not code — flip them yourself once the
+shakeout is clean.
 
 ## Setup
 
 **Requirements:** Python 3.11+
 
 ```bash
-git clone https://github.com/<you>/trading
+git clone https://github.com/oscartiz/trading
 cd trading
 
 python -m venv .venv && source .venv/bin/activate
