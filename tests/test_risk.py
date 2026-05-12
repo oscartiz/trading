@@ -23,6 +23,34 @@ def test_drawdown_halt():
     assert rm.update_equity(890.0) is False  # 11% — halt
 
 
+def test_update_equity_ignores_non_positive_values():
+    """A zero or negative equity reading should not move the HWM or trigger
+    a halt — otherwise a transient API hiccup that returns 0 would silently
+    seed an unrecoverable broken state (NaN drawdowns)."""
+    rm = RiskManager(RiskConfig(max_drawdown_pct=0.05))
+    assert rm.update_equity(1000.0) is True
+    # Zero equity — must be ignored
+    assert rm.update_equity(0.0) is True
+    assert rm.is_halted() is False
+    # Negative equity — also ignored
+    assert rm.update_equity(-50.0) is True
+    assert rm.is_halted() is False
+    # HWM should still be 1000, so a 5% drop from there should still halt
+    assert rm.update_equity(940.0) is False
+    assert rm.is_halted() is True
+
+
+def test_update_equity_initial_zero_does_not_seed_zero_hwm():
+    """First call with equity=0 must not pin hwm=0 — otherwise every subsequent
+    drawdown calc divides by zero and the halt never fires."""
+    rm = RiskManager(RiskConfig(max_drawdown_pct=0.05))
+    assert rm.update_equity(0.0) is True
+    # Now a real positive equity should seed the HWM cleanly.
+    rm.update_equity(1000.0)
+    rm.update_equity(900.0)
+    assert rm.is_halted() is True
+
+
 def test_halt_sets_flag_and_blocks_orders():
     rm = RiskManager(RiskConfig(max_order_usd=1000.0, max_position_usd=10_000.0, max_drawdown_pct=0.05))
     assert rm.is_halted() is False

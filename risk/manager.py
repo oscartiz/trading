@@ -55,6 +55,11 @@ class RiskManager:
         Existing positions are unaffected — strategies still close them via
         their normal exit paths (which don't go through check_order).
         """
+        # Non-positive equity is meaningless for the drawdown calc — the watchdog
+        # already filters it but defend the manager too. A zero hwm would otherwise
+        # produce NaN drawdowns that silently never trigger the halt.
+        if equity <= 0:
+            return not self._halted
         if self._equity_hwm is None or equity > self._equity_hwm:
             self._equity_hwm = equity
 

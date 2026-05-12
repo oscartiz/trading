@@ -308,6 +308,17 @@ class RegimeSwitchingStrategy(Strategy):
         notional = base_notional * scale
         size = round(notional / mid, 6)
 
+        # Catch the pathological case where notional / mid rounds to zero
+        # (tiny account or sub-dust notional) — a 0-size market_order would
+        # otherwise be sent to the exchange and rejected with an unhelpful
+        # error. Logging the skip makes the cause obvious.
+        if size <= 0:
+            logger.warning(
+                "{} | skipping entry: notional ${:.4f} @ {:.2f} rounds to size 0",
+                self.coin, notional, mid,
+            )
+            return
+
         if not self.risk.check_order(side, notional, 0.0):
             return
 

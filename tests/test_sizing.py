@@ -103,3 +103,19 @@ def test_entry_uses_pct_notional_end_to_end(tmp_path):
     # size = 85 / 100 = 0.85
     assert len(om.orders) == 1
     assert om.orders[0].size == 0.85
+
+
+def test_entry_skipped_when_size_rounds_to_zero(tmp_path):
+    """Tiny notional / large mid combinations must not send a 0-size order."""
+    # mid is high (BTC scale) and equity is tiny → rounded size = 0
+    s, om = _build_strategy(
+        tmp_path, pct=0.10, equity_source=lambda: 0.001, fixed_usd=0.001,
+    )
+    s._streak_target = Regime.BULL
+    s._streak_bars = 100
+
+    asyncio.run(s._maybe_enter(_bull_snapshot(), None, mid=50_000.0))
+
+    # No order should have been placed.
+    assert om.orders == []
+    assert s._in_position is False

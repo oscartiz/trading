@@ -146,10 +146,40 @@ def test_long_winning_trade_pnl_and_fees():
     assert t.entry_price == pytest.approx(100.0)
     assert t.exit_price == pytest.approx(110.0)
     expected_price_pnl = (110.0 - 100.0) / 100.0 * 100.0   # +10 USD
-    expected_fees = 2 * 0.001 * 100.0                       # 0.2 USD
+    # Per-leg fees: size = $100 / $100 = 1.0 unit; entry leg pays
+    # 1 * 100 * 0.001 = 0.10, exit leg pays 1 * 110 * 0.001 = 0.11.
+    expected_fees = 0.10 + 0.11
     assert t.price_pnl == pytest.approx(expected_price_pnl)
     assert t.fees == pytest.approx(expected_fees)
     assert t.total_pnl == pytest.approx(expected_price_pnl - expected_fees)
+
+
+def test_losing_long_trade_pays_smaller_exit_fee_than_winning():
+    """Per-leg fees: a -10% long pays less in fees than a +10% long, because
+    the exit-leg notional shrinks with price. Pin the asymmetry."""
+    # Winning long: 100 → 110
+    win_prices = build_prices([100.0] * 40 + [110.0] * 10)
+    bull = make_snap(0.05, 0.10, 0.85, expected_return=0.001)
+    chop = make_snap(0.10, 0.80, 0.10)
+    loop = [bull] * 10 + [chop] * 10
+    cfg = _base_cfg(min_hold_bars=0, exit_proba=0.45)
+
+    with _patch_classifier(StubClassifier(loop)):
+        win = run_regime_backtest(win_prices, "BTC", cfg, fee_rate=0.001)
+
+    # Losing long: 100 → 90 (same flow, just inverted price target). Use a
+    # huge stop so the regime exit drives the exit price, not the stop.
+    lose_cfg = _base_cfg(min_hold_bars=0, exit_proba=0.45, stop_loss_pct=1.0)
+    lose_prices = build_prices([100.0] * 40 + [90.0] * 10)
+    with _patch_classifier(StubClassifier(loop)):
+        lose = run_regime_backtest(lose_prices, "BTC", lose_cfg, fee_rate=0.001)
+
+    assert len(win.trades) == 1 and len(lose.trades) == 1
+    w, l = win.trades[0], lose.trades[0]
+    # Winner pays 0.10 + 0.11 = 0.21 ; Loser pays 0.10 + 0.09 = 0.19
+    assert w.fees == pytest.approx(0.21)
+    assert l.fees == pytest.approx(0.19)
+    assert w.fees > l.fees
 
 
 def test_short_winning_trade_pnl():

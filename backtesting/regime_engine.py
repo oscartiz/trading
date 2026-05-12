@@ -199,7 +199,13 @@ def run_regime_backtest(
                     reason = "max_hold"
 
             if reason:
-                fees = 2 * fee_rate * cfg.position_size_usd
+                # Charge fees on the actual notional of each leg: a winning
+                # long pays slightly more on exit than entry because exit_price
+                # > entry_price, and vice-versa. The naive 2 * fee_rate * notional
+                # form silently rounds this off and was inconsistent with the
+                # live paper manager.
+                size_units = cfg.position_size_usd / entry_price
+                fees = fee_rate * size_units * (entry_price + exit_price)
                 trade = RegimeTrade(
                     entry_time=entry_ts,
                     exit_time=ts,
@@ -280,7 +286,8 @@ def run_regime_backtest(
     # Close any open position at the end
     if in_position:
         final_close = float(closes[-1])
-        fees = 2 * fee_rate * cfg.position_size_usd
+        size_units = cfg.position_size_usd / entry_price
+        fees = fee_rate * size_units * (entry_price + final_close)
         trades.append(RegimeTrade(
             entry_time=entry_ts,
             exit_time=timestamps[-1],

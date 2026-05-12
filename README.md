@@ -339,7 +339,7 @@ calibration, parameter sweep).
 ```bash
 source .venv/bin/activate
 python -m pytest -q
-# 221 passed
+# 241 passed
 ```
 
 ## Disclaimer
