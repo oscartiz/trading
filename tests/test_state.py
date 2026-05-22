@@ -54,6 +54,42 @@ def test_state_store_handles_corrupt_json(tmp_path):
     assert store.load() == {}
 
 
+def test_state_store_stamps_and_strips_schema_version(tmp_path):
+    """save() writes _schema_version; load() returns the payload sans key."""
+    store = StateStore("foo", "BTC", root=tmp_path, schema_version=2)
+    store.save({"x": 1})
+    raw = store.path.read_text()
+    assert '"_schema_version": 2' in raw
+    loaded = store.load()
+    assert "_schema_version" not in loaded
+    assert loaded == {"x": 1}
+
+
+def test_state_store_refuses_to_load_newer_schema(tmp_path):
+    """A file written by schema v3 must not be silently read by a v2 binary —
+    fields the older code doesn't know about would be dropped on the next save."""
+    import pytest
+
+    from runtime import StateSchemaError
+    writer = StateStore("foo", "BTC", root=tmp_path, schema_version=3)
+    writer.save({"new_field": "value"})
+
+    reader = StateStore("foo", "BTC", root=tmp_path, schema_version=2)
+    with pytest.raises(StateSchemaError, match="v3"):
+        reader.load()
+
+
+def test_state_store_accepts_legacy_unversioned_file(tmp_path):
+    """A file written by a pre-version StateStore loads as v1 with the legacy
+    body intact (the strategy reader defaults missing fields)."""
+    import json
+    store = StateStore("foo", "BTC", root=tmp_path, schema_version=2)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    # Hand-written legacy file: no _schema_version key.
+    store.path.write_text(json.dumps({"legacy_field": 1}))
+    assert store.load() == {"legacy_field": 1}
+
+
 def test_state_store_isolates_by_name_and_coin(tmp_path):
     a = StateStore("strat_a", "BTC", root=tmp_path)
     b = StateStore("strat_b", "BTC", root=tmp_path)

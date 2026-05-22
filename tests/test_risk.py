@@ -258,6 +258,78 @@ def test_pristine_state_does_not_set_halt(tmp_path):
     assert rm._equity_hwm is None
 
 
+# --------------------------------------------------------------------------- #
+#  Equity-relative caps                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_max_order_pct_overrides_usd_when_equity_known():
+    rm = RiskManager(RiskConfig(
+        max_order_usd=100.0, max_position_usd=1_000.0,
+        max_order_pct=0.10, max_position_pct=0.50, max_drawdown_pct=0.99,
+    ))
+    rm.update_equity(5_000.0)
+    # 10% of $5k = $500, so a $300 order should pass even though the absolute
+    # max_order_usd is $100.
+    assert rm.check_order("B", 300.0, 0.0) is True
+    # …but a $600 order should still fail (over the $500 pct cap).
+    assert rm.check_order("B", 600.0, 0.0) is False
+
+
+def test_max_position_pct_overrides_usd_when_equity_known():
+    rm = RiskManager(RiskConfig(
+        max_order_usd=10_000.0, max_position_usd=200.0,
+        max_position_pct=0.30, max_drawdown_pct=0.99,
+    ))
+    rm.update_equity(2_000.0)
+    # 30% of $2k = $600, so a $500 projected position passes even though
+    # max_position_usd is $200.
+    assert rm.check_order("B", 500.0, 0.0) is True
+    assert rm.check_order("B", 700.0, 0.0) is False
+
+
+def test_pct_caps_fall_back_to_usd_before_equity_seen():
+    """Until update_equity has been called, the percentage caps have no
+    denominator. The manager must keep using the absolute USD caps."""
+    rm = RiskManager(RiskConfig(
+        max_order_usd=100.0, max_position_usd=200.0,
+        max_order_pct=0.50, max_position_pct=0.50, max_drawdown_pct=0.99,
+    ))
+    assert rm.check_order("B", 50.0, 0.0) is True
+    assert rm.check_order("B", 150.0, 0.0) is False    # over absolute order cap
+
+
+def test_pct_caps_scale_with_equity_growth():
+    """As equity grows, the percentage cap unlocks proportionally larger orders."""
+    rm = RiskManager(RiskConfig(
+        max_order_usd=50.0, max_position_usd=100.0,
+        max_order_pct=0.10, max_position_pct=0.20, max_drawdown_pct=0.99,
+    ))
+    rm.update_equity(1_000.0)
+    assert rm.max_order_cap() == 100.0
+    rm.update_equity(10_000.0)
+    assert rm.max_order_cap() == 1_000.0
+
+
+def test_last_equity_persists_across_instances(tmp_path):
+    """last_equity must survive a restart so pct caps don't silently collapse
+    to the absolute USD fallbacks on the first tick after a reboot."""
+    store = StateStore("risk", "global", root=tmp_path, schema_version=2)
+    rm1 = RiskManager(
+        RiskConfig(max_drawdown_pct=0.99, max_position_pct=0.5, max_order_pct=0.2),
+        state_store=store,
+    )
+    rm1.update_equity(4_000.0)
+    assert rm1.max_order_cap() == 800.0
+
+    store2 = StateStore("risk", "global", root=tmp_path, schema_version=2)
+    rm2 = RiskManager(
+        RiskConfig(max_drawdown_pct=0.99, max_position_pct=0.5, max_order_pct=0.2),
+        state_store=store2,
+    )
+    assert rm2.max_order_cap() == 800.0
+
+
 def test_corrupt_risk_state_is_ignored(tmp_path):
     """A corrupt JSON file must not crash startup — load defaults instead."""
     store = StateStore("risk", "global", root=tmp_path)

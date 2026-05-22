@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Callable
 
 from loguru import logger
 
+from .metrics import REGISTRY as METRICS
+
 if TYPE_CHECKING:
     from risk import RiskManager
 
@@ -19,13 +21,19 @@ async def equity_watchdog(
 
     The watchdog never raises — a failed poll logs a warning and retries on the
     next tick, so a transient API hiccup doesn't take down the strategy loop.
+
+    ``get_equity`` is expected to be a sync callable that may block on a
+    REST round-trip; the watchdog runs it via ``asyncio.to_thread`` so a
+    slow exchange response never freezes the event loop (and with it the
+    heartbeat — the very signal that would page the operator).
     """
     logger.info("equity_watchdog started | poll_seconds={}", poll_seconds)
     while True:
         try:
-            equity = get_equity()
+            equity = await asyncio.to_thread(get_equity)
             if equity > 0:
                 risk.update_equity(equity)
+                METRICS.set("equity_usd", float(equity))
         except Exception as exc:
             logger.warning("equity_watchdog poll failed: {}", exc)
         await asyncio.sleep(poll_seconds)

@@ -45,14 +45,18 @@ class GaussianHMM:
         tol: float = 1e-4,
         min_variance: float = 1e-8,
         random_state: int = 0,
+        n_seeds: int = 1,
     ) -> None:
         if n_states < 2:
             raise ValueError("n_states must be ≥ 2")
+        if n_seeds < 1:
+            raise ValueError("n_seeds must be ≥ 1")
         self.n_states = n_states
         self.n_iter = n_iter
         self.tol = tol
         self.min_variance = min_variance
         self.random_state = random_state
+        self.n_seeds = n_seeds
         self.params: HMMParams | None = None
         self.log_likelihood_: float | None = None
         self.n_iter_run_: int = 0
@@ -63,23 +67,40 @@ class GaussianHMM:
         if x.size < self.n_states * 5:
             raise ValueError(f"Need at least {self.n_states * 5} samples to fit {self.n_states}-state HMM")
 
-        params = self._init_params(x)
-        prev_ll = -np.inf
+        # EM is local-optimum sensitive — refit with `n_seeds` different
+        # random initialisations and keep the one with highest log-likelihood.
+        # Cheap insurance against the model landing on a bad mode for a week.
+        best_params: HMMParams | None = None
+        best_ll: float = -np.inf
+        best_iters: int = 0
+        for seed_offset in range(self.n_seeds):
+            params, ll, iters = self._fit_once(x, seed=self.random_state + seed_offset)
+            if ll > best_ll:
+                best_ll = ll
+                best_params = params
+                best_iters = iters
 
+        assert best_params is not None
+        self.params = self._sort_by_mean(best_params)
+        self.log_likelihood_ = float(best_ll)
+        self.n_iter_run_ = best_iters
+        return self
+
+    def _fit_once(self, x: np.ndarray, seed: int) -> tuple[HMMParams, float, int]:
+        """Single EM pass from one random init. Returns (params, ll, iters_run)."""
+        params = self._init_params(x, seed=seed)
+        prev_ll = -np.inf
+        iters_run = 0
         for it in range(self.n_iter):
             log_emit = self._log_emissions(x, params)
             log_alpha, ll = self._forward(log_emit, params)
             log_beta = self._backward(log_emit, params)
             params = self._m_step(x, log_emit, log_alpha, log_beta, params)
-            self.n_iter_run_ = it + 1
+            iters_run = it + 1
             if np.isfinite(ll) and abs(ll - prev_ll) < self.tol:
                 break
             prev_ll = ll
-
-        params = self._sort_by_mean(params)
-        self.params = params
-        self.log_likelihood_ = float(prev_ll)
-        return self
+        return params, prev_ll, iters_run
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         """Smoothed posteriors P(state_t | x_{1..T}) — shape (T, K)."""
@@ -129,16 +150,19 @@ class GaussianHMM:
             raise RuntimeError("HMM is not fitted yet — call fit() first.")
         return self.params
 
-    def _init_params(self, x: np.ndarray) -> HMMParams:
-        """Quantile-based initialisation: split sorted x into K equal chunks."""
-        rng = np.random.default_rng(self.random_state)
+    def _init_params(self, x: np.ndarray, seed: int | None = None) -> HMMParams:
+        """Quantile-based initialisation: split sorted x into K equal chunks.
+
+        ``seed`` overrides ``self.random_state``; the ensemble fitter uses
+        this to draw distinct initial conditions across its restarts."""
+        rng = np.random.default_rng(self.random_state if seed is None else seed)
         K = self.n_states
         sorted_x = np.sort(x)
         chunks = np.array_split(sorted_x, K)
         means = np.array([float(c.mean()) for c in chunks])
         variances = np.array([max(float(c.var()), self.min_variance) for c in chunks])
-        # Tiny noise so the symmetry breaks if all chunks happen to be identical.
-        means += rng.normal(0, 1e-6, size=K)
+        # Per-seed noise so each ensemble restart explores a different basin.
+        means += rng.normal(0, 1e-4, size=K)
         # Persistent transitions encourage regime stickiness.
         trans = np.full((K, K), 0.05 / max(K - 1, 1))
         np.fill_diagonal(trans, 0.95)

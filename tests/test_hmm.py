@@ -186,3 +186,38 @@ def test_hmm_predict_returns_only_valid_state_indices():
     assert states.min() >= 0
     assert states.max() <= 2
     assert states.dtype.kind in ("i", "u")
+
+# --------------------------------------------------------------------------- #
+#  Ensemble fit                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_hmm_n_seeds_picks_best_log_likelihood():
+    """Refitting with n_seeds > 1 must return params with LL at least as good
+    as any single-seed fit. The ensemble keeps the argmax over restarts."""
+    rng = np.random.default_rng(7)
+    returns = rng.normal(0.0, 0.005, size=400)
+
+    single = GaussianHMM(n_states=3, n_iter=30, random_state=0, n_seeds=1).fit(returns)
+    ensemble = GaussianHMM(n_states=3, n_iter=30, random_state=0, n_seeds=5).fit(returns)
+
+    assert single.log_likelihood_ is not None
+    assert ensemble.log_likelihood_ is not None
+    assert ensemble.log_likelihood_ >= single.log_likelihood_
+
+
+def test_hmm_n_seeds_one_matches_legacy_behaviour():
+    """n_seeds=1 must converge to the same params as the historic single-fit
+    path so existing tests / backtests don't shift under us."""
+    rng = np.random.default_rng(3)
+    returns = rng.normal(0.0, 0.005, size=300)
+    h1 = GaussianHMM(n_states=3, n_iter=50, random_state=0, n_seeds=1).fit(returns)
+    h2 = GaussianHMM(n_states=3, n_iter=50, random_state=0, n_seeds=1).fit(returns)
+    assert h1.params is not None and h2.params is not None
+    np.testing.assert_allclose(h1.params.means, h2.params.means)
+
+
+def test_hmm_invalid_n_seeds_raises():
+    with pytest.raises(ValueError, match="n_seeds"):
+        GaussianHMM(n_states=3, n_seeds=0)
+

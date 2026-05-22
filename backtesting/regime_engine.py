@@ -6,11 +6,16 @@ Walk-forward design:
       bar against the rolling window of returns.
     - The HMM is refit every `refit_every_bars` bars to keep parameters fresh
       while avoiding the cost of refitting every bar.
-    - Trade decisions follow the same logic as the live strategy.
+    - Trade decisions follow the same logic as the live strategy, including
+      the staged soft-exit, volatility-scaled sizing, and the fee-aware
+      ``min_expected_return`` gate. When a ``funding_df`` is supplied,
+      per-settlement funding is accrued against open positions so the
+      multi-day holds don't appear cheaper than they are in production.
 
 Inputs:
-    prices_df : DataFrame[timestamp, open, high, low, close, volume]
-    config    : RegimeSwitchingConfig
+    prices_df  : DataFrame[timestamp, open, high, low, close, volume]
+    funding_df : optional DataFrame[timestamp, funding_rate]
+    config     : RegimeSwitchingConfig
 """
 from __future__ import annotations
 
@@ -40,15 +45,26 @@ class RegimeTrade:
     entry_proba: float
     exit_reason: str
     fees: float
+    funding: float = 0.0
+    partial_exits: list[dict] = field(default_factory=list)
 
     @property
     def price_pnl(self) -> float:
         direction = 1.0 if self.side == "long" else -1.0
-        return direction * (self.exit_price - self.entry_price) / self.entry_price * self.position_size_usd
+        # Residual leg P&L (full size that wasn't trimmed by partials).
+        residual_units = self.position_size_usd / self.entry_price
+        residual_units -= sum(p.get("units", 0.0) for p in self.partial_exits)
+        residual_pnl = direction * (self.exit_price - self.entry_price) * residual_units
+        # Add P&L from partial-exit legs.
+        partial_pnl = sum(
+            direction * (p["exit_price"] - self.entry_price) * p["units"]
+            for p in self.partial_exits
+        )
+        return residual_pnl + partial_pnl
 
     @property
     def total_pnl(self) -> float:
-        return self.price_pnl - self.fees
+        return self.price_pnl - self.fees - self.funding
 
     @property
     def hold_hours(self) -> float:
@@ -72,6 +88,10 @@ class RegimeBacktestResult:
         return sum(t.fees for t in self.trades)
 
     @property
+    def total_funding(self) -> float:
+        return sum(t.funding for t in self.trades)
+
+    @property
     def gross_pnl(self) -> float:
         return sum(t.price_pnl for t in self.trades)
 
@@ -80,13 +100,46 @@ class RegimeBacktestResult:
         return sum(t.total_pnl for t in self.trades)
 
 
+def _funding_lookup(funding_df: pd.DataFrame | None) -> tuple[np.ndarray, np.ndarray]:
+    """Return (timestamps_ns, rates) arrays for fast searchsorted lookups."""
+    if funding_df is None or funding_df.empty:
+        return np.empty(0, dtype="int64"), np.empty(0, dtype=np.float64)
+    ts = pd.to_datetime(funding_df["timestamp"], utc=True).astype("int64").to_numpy()
+    rates = funding_df["funding_rate"].astype(float).to_numpy()
+    order = np.argsort(ts)
+    return ts[order], rates[order]
+
+
+def _accrue_funding_between(
+    ts_arr: np.ndarray, rates: np.ndarray,
+    start_ns: int, end_ns: int,
+    side: Side, notional: float,
+) -> float:
+    """Sum funding payments in (start_ns, end_ns] for an open position.
+
+    Convention: positive funding_rate means longs pay shorts. The returned
+    value is positive if the position paid funding, negative if it received.
+    """
+    if ts_arr.size == 0 or notional == 0 or end_ns <= start_ns:
+        return 0.0
+    lo = int(np.searchsorted(ts_arr, start_ns, side="right"))
+    hi = int(np.searchsorted(ts_arr, end_ns, side="right"))
+    if hi <= lo:
+        return 0.0
+    rate_sum = float(rates[lo:hi].sum())
+    sign = 1.0 if side == "long" else -1.0
+    return sign * rate_sum * notional
+
+
 def run_regime_backtest(
     prices_df: pd.DataFrame,
     coin: str,
     config: RegimeSwitchingConfig | None = None,
     fee_rate: float = TAKER_FEE_RATE,
+    funding_df: pd.DataFrame | None = None,
 ) -> RegimeBacktestResult:
     cfg = config or RegimeSwitchingConfig()
+    min_er = cfg.derive_min_expected_return()
     df = prices_df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
     if "close" not in df.columns:
         raise ValueError("prices_df must include a 'close' column")
@@ -95,12 +148,16 @@ def run_regime_backtest(
     highs = df["high"].to_numpy(dtype=np.float64) if "high" in df.columns else closes
     lows = df["low"].to_numpy(dtype=np.float64) if "low" in df.columns else closes
     timestamps = df["timestamp"].tolist()
+    timestamp_ns = pd.to_datetime(df["timestamp"], utc=True).astype("int64").to_numpy()
     n = len(df)
+
+    funding_ts, funding_rates = _funding_lookup(funding_df)
 
     classifier = RegimeClassifier(
         n_iter=cfg.hmm_max_iter,
         tol=cfg.hmm_tol,
         random_state=cfg.hmm_random_state,
+        n_seeds=cfg.hmm_n_seeds,
     )
 
     if n <= cfg.train_window_bars + 1:
@@ -122,10 +179,16 @@ def run_regime_backtest(
     n_refits = 0
     last_exit_regime: Regime | None = None
     last_exit_idx: int = -10**9
-    # Tracks how many consecutive bars the same regime has been the entry
-    # candidate. Resets when the candidate flips or disappears.
     streak_target: Regime | None = None
     streak_bars: int = 0
+
+    # Per-position state for vol-scaled sizing, staged exit, and funding accrual.
+    entry_notional = cfg.position_size_usd
+    entry_units = 0.0
+    soft_exit_done = False
+    partial_exits: list[dict] = []
+    accrued_funding = 0.0
+    last_funding_check_ns = 0
 
     # Initial fit on the first window
     init_returns = log_returns_from_close(closes[: cfg.train_window_bars + 1])
@@ -133,6 +196,14 @@ def run_regime_backtest(
     n_refits += 1
 
     realised_pnl = 0.0
+
+    def _resolve_notional(expected_vol: float | None) -> float:
+        base = cfg.position_size_usd
+        if cfg.vol_target_per_bar is not None and expected_vol is not None and expected_vol > 0:
+            scale = cfg.vol_target_per_bar / expected_vol
+            scale = max(cfg.min_vol_scale, min(cfg.max_vol_scale, scale))
+            base = base * scale
+        return base
 
     for t in range(cfg.train_window_bars, n):
         bars_since_fit += 1
@@ -153,6 +224,7 @@ def run_regime_backtest(
             viterbi_label = Regime(int(classifier.predict(returns)[-1]))
         ts = timestamps[t]
         close = closes[t]
+        ts_ns = int(timestamp_ns[t])
 
         regime_rows.append({
             "timestamp": ts,
@@ -162,6 +234,18 @@ def run_regime_backtest(
             "p_bull": float(snap.proba[2]),
             "expected_return": snap.expected_return,
         })
+
+        # Accrue funding for any open position between last bar and this bar.
+        if in_position and funding_ts.size:
+            residual_units = entry_units - sum(p["units"] for p in partial_exits)
+            residual_notional = residual_units * entry_price if residual_units > 0 else 0.0
+            if residual_notional > 0:
+                accrued_funding += _accrue_funding_between(
+                    funding_ts, funding_rates,
+                    last_funding_check_ns, ts_ns,
+                    side, residual_notional,
+                )
+            last_funding_check_ns = ts_ns
 
         # ---- exit handling ----
         if in_position:
@@ -198,47 +282,75 @@ def run_regime_backtest(
                 if not reason and held_bars >= cfg.max_hold_bars:
                     reason = "max_hold"
 
+            # Staged soft-exit (smoothed mode only) — trim once when the held
+            # posterior dips below soft_exit_proba but is still above exit_proba.
+            if (not reason
+                    and cfg.signal_mode == "smoothed"
+                    and cfg.soft_exit_proba is not None
+                    and not soft_exit_done
+                    and held_bars >= cfg.min_hold_bars):
+                held_proba = float(snap.proba[int(target_regime)])
+                if cfg.exit_proba <= held_proba < cfg.soft_exit_proba:
+                    fraction = max(0.0, min(1.0, cfg.staged_exit_fraction))
+                    trim_units = entry_units * fraction
+                    if trim_units > 0:
+                        # Only the exit-leg fee — the entry fee was charged in
+                        # full at position-open time.
+                        fee_charge = fee_rate * trim_units * close
+                        partial_exits.append({
+                            "units": float(trim_units),
+                            "exit_price": float(close),
+                            "fees": float(fee_charge),
+                            "timestamp": ts,
+                            "reason": f"staged_soft_exit_p={held_proba:.2f}",
+                        })
+                        soft_exit_done = True
+
             if reason:
-                # Charge fees on the actual notional of each leg: a winning
-                # long pays slightly more on exit than entry because exit_price
-                # > entry_price, and vice-versa. The naive 2 * fee_rate * notional
-                # form silently rounds this off and was inconsistent with the
-                # live paper manager.
-                size_units = cfg.position_size_usd / entry_price
-                fees = fee_rate * size_units * (entry_price + exit_price)
+                # Entry fee charged on the full original size once. Exit fees
+                # charged on the residual close + each partial close at their
+                # respective fill prices.
+                trimmed_units = sum(p["units"] for p in partial_exits)
+                residual_units = max(0.0, entry_units - trimmed_units)
+                entry_fee = fee_rate * entry_units * entry_price
+                residual_exit_fee = fee_rate * residual_units * exit_price
+                partial_fee_sum = sum(p["fees"] for p in partial_exits)
+                fees = entry_fee + residual_exit_fee + partial_fee_sum
+
                 trade = RegimeTrade(
                     entry_time=entry_ts,
                     exit_time=ts,
                     side=side,
                     entry_price=entry_price,
                     exit_price=exit_price,
-                    position_size_usd=cfg.position_size_usd,
+                    position_size_usd=entry_notional,
                     entry_regime=target_regime.label,
-                    entry_proba=float(snap.proba[int(target_regime)]),  # current proba at exit time
+                    entry_proba=float(snap.proba[int(target_regime)]),
                     exit_reason=reason,
                     fees=fees,
+                    funding=accrued_funding,
+                    partial_exits=list(partial_exits),
                 )
                 trades.append(trade)
                 realised_pnl += trade.total_pnl
                 in_position = False
                 last_exit_regime = target_regime
                 last_exit_idx = t
+                partial_exits = []
+                accrued_funding = 0.0
+                soft_exit_done = False
 
         # ---- entry handling (new entries are gated on the same bar after exits) ----
-        # First compute the candidate target ignoring streak/cooldown so we can
-        # update the per-bar streak counter even when we're already in position.
         candidate: Regime | None = None
         if cfg.signal_mode == "viterbi":
-            if viterbi_label == Regime.BULL and snap.expected_return >= cfg.min_expected_return_per_bar:
+            if viterbi_label == Regime.BULL and snap.expected_return >= min_er:
                 candidate = Regime.BULL
-            elif viterbi_label == Regime.BEAR and snap.expected_return <= -cfg.min_expected_return_per_bar:
+            elif viterbi_label == Regime.BEAR and snap.expected_return <= -min_er:
                 candidate = Regime.BEAR
         elif snap.proba[1] <= cfg.max_chop_proba:
-            if (snap.proba[2] >= cfg.entry_proba
-                    and snap.expected_return >= cfg.min_expected_return_per_bar):
+            if snap.proba[2] >= cfg.entry_proba and snap.expected_return >= min_er:
                 candidate = Regime.BULL
-            elif (snap.proba[0] >= cfg.entry_proba
-                    and snap.expected_return <= -cfg.min_expected_return_per_bar):
+            elif snap.proba[0] >= cfg.entry_proba and snap.expected_return <= -min_er:
                 candidate = Regime.BEAR
 
         if candidate is not None and candidate == streak_target:
@@ -253,8 +365,6 @@ def run_regime_backtest(
         if not in_position:
             target: Regime | None = candidate
 
-            # Confirmation: target must have been the candidate for ≥ N consecutive bars.
-            # Short side may use a smaller gate than long.
             if target is not None:
                 required = cfg.entry_confirmation_bars
                 if target == Regime.BEAR and cfg.entry_confirmation_bars_short is not None:
@@ -262,7 +372,6 @@ def run_regime_backtest(
                 if streak_bars < required:
                     target = None
 
-            # Same-regime cooldown: don't re-enter the regime we just exited.
             if (target is not None
                     and last_exit_regime == target
                     and (t - last_exit_idx) < cfg.same_regime_cooldown_bars):
@@ -275,30 +384,45 @@ def run_regime_backtest(
                 entry_price = close
                 entry_idx = t
                 entry_ts = ts
+                entry_notional = _resolve_notional(snap.expected_vol)
+                entry_units = entry_notional / entry_price
+                soft_exit_done = False
+                partial_exits = []
+                accrued_funding = 0.0
+                last_funding_check_ns = ts_ns
 
         # ---- mark-to-market equity ----
         unrealised = 0.0
         if in_position:
             direction = 1.0 if side == "long" else -1.0
-            unrealised = direction * (close - entry_price) / entry_price * cfg.position_size_usd
+            residual_units = max(0.0, entry_units - sum(p["units"] for p in partial_exits))
+            unrealised = direction * (close - entry_price) * residual_units
+            for p in partial_exits:
+                unrealised += direction * (p["exit_price"] - entry_price) * p["units"]
         equity_pts.append((ts, realised_pnl + unrealised))
 
     # Close any open position at the end
     if in_position:
         final_close = float(closes[-1])
-        size_units = cfg.position_size_usd / entry_price
-        fees = fee_rate * size_units * (entry_price + final_close)
+        trimmed_units = sum(p["units"] for p in partial_exits)
+        residual_units = max(0.0, entry_units - trimmed_units)
+        entry_fee = fee_rate * entry_units * entry_price
+        residual_exit_fee = fee_rate * residual_units * final_close
+        partial_fee_sum = sum(p["fees"] for p in partial_exits)
+        fees = entry_fee + residual_exit_fee + partial_fee_sum
         trades.append(RegimeTrade(
             entry_time=entry_ts,
             exit_time=timestamps[-1],
             side=side,
             entry_price=entry_price,
             exit_price=final_close,
-            position_size_usd=cfg.position_size_usd,
+            position_size_usd=entry_notional,
             entry_regime=target_regime.label,
             entry_proba=0.0,
             exit_reason="backtest_end",
             fees=fees,
+            funding=accrued_funding,
+            partial_exits=list(partial_exits),
         ))
 
     equity_curve = pd.Series(
@@ -346,9 +470,12 @@ def regime_metrics(result: RegimeBacktestResult) -> dict:
     sharpe = (float(delta.mean()) / std * math.sqrt(8760)) if std > 0 else 0.0
     reasons: dict[str, int] = {}
     sides_count = {"long": 0, "short": 0}
+    partial_count = 0
     for t in trades:
         reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
         sides_count[t.side] += 1
+        if t.partial_exits:
+            partial_count += 1
     duration_days = (result.end - result.start).total_seconds() / 86400
     return {
         "coin": result.coin,
@@ -357,9 +484,11 @@ def regime_metrics(result: RegimeBacktestResult) -> dict:
         "n_trades": n,
         "longs": sides_count["long"],
         "shorts": sides_count["short"],
+        "n_with_partial_exits": partial_count,
         "total_pnl_usd": round(sum(pnls), 4),
         "gross_pnl_usd": round(result.gross_pnl, 4),
         "total_fees_usd": round(result.total_fees, 4),
+        "total_funding_usd": round(result.total_funding, 4),
         "win_rate_pct": round(win_rate * 100, 1),
         "avg_pnl_per_trade_usd": round(sum(pnls) / n, 4),
         "best_trade_usd": round(max(pnls), 4),
@@ -383,23 +512,26 @@ def print_regime_metrics(result: RegimeBacktestResult) -> None:
     print(f"  Regime-Switching Backtest — {m['coin']}")
     print("=" * 60)
     print(f"  Period       : {result.start:%Y-%m-%d} → {result.end:%Y-%m-%d}  ({m['period_days']} days)")
-    print(f"  HMM window   : {cfg.train_window_bars} bars   refits: {m['n_refits']}")
+    print(f"  HMM window   : {cfg.train_window_bars} bars   refits: {m['n_refits']}   seeds: {cfg.hmm_n_seeds}")
     print(f"  Signal mode  : {cfg.signal_mode}")
-    print(f"  Entry P      : ≥{cfg.entry_proba:.2f}    Exit P: <{cfg.exit_proba:.2f}")
+    print(f"  Entry P      : ≥{cfg.entry_proba:.2f}    Exit P: <{cfg.exit_proba:.2f}"
+          f"    Soft: <{cfg.soft_exit_proba if cfg.soft_exit_proba is not None else 'off'}")
     print(f"  Stop / TP    : {cfg.stop_loss_pct:.0%} / "
           f"{(f'{cfg.take_profit_pct:.0%}' if cfg.take_profit_pct else 'off')}")
     short_conf = (cfg.entry_confirmation_bars_short
                   if cfg.entry_confirmation_bars_short is not None
                   else cfg.entry_confirmation_bars)
     print(f"  Hold bounds  : min={cfg.min_hold_bars}  max={cfg.max_hold_bars}  cooldown={cfg.same_regime_cooldown_bars}  confirm={cfg.entry_confirmation_bars}/{short_conf} (long/short)")
-    print(f"  Position     : ${cfg.position_size_usd}")
+    print(f"  Position     : ${cfg.position_size_usd} (vol_target={cfg.vol_target_per_bar})")
     print()
-    print(f"  Trades       : {m['n_trades']}   (long={m['longs']} short={m['shorts']})")
+    print(f"  Trades       : {m['n_trades']}   (long={m['longs']} short={m['shorts']}, "
+          f"with partials={m['n_with_partial_exits']})")
     print(f"  Win rate     : {m['win_rate_pct']}%")
     print(f"  Avg hold     : {m['avg_hold_hours']}h")
     print()
     print(f"  Gross P&L    : ${m['gross_pnl_usd']:+.4f}")
     print(f"  Fees paid    : ${m['total_fees_usd']:.4f}")
+    print(f"  Funding      : ${m['total_funding_usd']:+.4f}")
     print(f"  Net P&L      : ${m['total_pnl_usd']:+.4f}")
     print(f"  Per trade    : ${m['avg_pnl_per_trade_usd']:+.4f}")
     print(f"  Best / Worst : ${m['best_trade_usd']:+.4f}  /  ${m['worst_trade_usd']:+.4f}")

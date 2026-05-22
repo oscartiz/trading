@@ -78,5 +78,22 @@ class OrderManager:
                 fill_price = float(filled["avgPx"])
             except (TypeError, ValueError):
                 fill_price = None
+        # Hyperliquid returns the fee on the filled status as a string in USDC.
+        # Field name varies between SDK versions ("fee" / "feeUsd") so we look
+        # at both. Capturing this lets the trade journal reconcile real fees
+        # against the strategy's modelled fees post-mortem.
+        fee: float | None = None
+        for key in ("fee", "feeUsd"):
+            raw_fee = filled.get(key)
+            if raw_fee is None:
+                continue
+            try:
+                fee = float(raw_fee)
+                break
+            except (TypeError, ValueError):
+                fee = None
         logger.info("Order ok | oid={} data={}", oid, data)
-        return OrderResult(success=True, order_id=oid, raw=raw, fill_price=fill_price)
+        return OrderResult(
+            success=True, order_id=oid, raw=raw,
+            fill_price=fill_price, fee=fee,
+        )

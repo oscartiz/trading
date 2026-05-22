@@ -113,3 +113,50 @@ def test_parse_returned_object_is_OrderResult():
     """Smoke test on the contract: _parse returns the right type."""
     raw = {"status": "ok", "response": {"data": {"statuses": [{}]}}}
     assert isinstance(_make_manager()._parse(raw), OrderResult)
+
+
+def test_parse_captures_live_fee_from_filled_status():
+    """The Hyperliquid SDK puts the fee on the filled status — the journal
+    relies on this being captured so live P&L reconciliation isn't fee-blind."""
+    raw = {
+        "status": "ok",
+        "response": {
+            "data": {
+                "statuses": [
+                    {"filled": {"oid": 1, "avgPx": "65000.0", "totalSz": "0.001", "fee": "0.0228"}}
+                ]
+            }
+        },
+    }
+    result = _make_manager()._parse(raw)
+    assert result.success is True
+    assert result.fee == 0.0228
+
+
+def test_parse_falls_back_to_feeUsd_field():
+    """Older SDK versions named the field feeUsd — accept both."""
+    raw = {
+        "status": "ok",
+        "response": {
+            "data": {
+                "statuses": [
+                    {"filled": {"oid": 1, "avgPx": "100", "totalSz": "1", "feeUsd": "0.42"}}
+                ]
+            }
+        },
+    }
+    result = _make_manager()._parse(raw)
+    assert result.fee == 0.42
+
+
+def test_parse_missing_fee_stays_none():
+    """No fee field in the response → OrderResult.fee is None (not zero, to
+    distinguish 'unknown' from 'free trade')."""
+    raw = {
+        "status": "ok",
+        "response": {
+            "data": {"statuses": [{"filled": {"oid": 1, "avgPx": "100", "totalSz": "1"}}]}
+        },
+    }
+    result = _make_manager()._parse(raw)
+    assert result.fee is None

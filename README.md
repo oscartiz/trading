@@ -11,11 +11,14 @@ Fits a 3-state Gaussian Hidden Markov Model to hourly log returns and labels eve
 - **P(bull) ≥ 0.85** sustained for `entry_confirmation_bars` (6 hours, long side) → opens **long**
 - **P(bear) ≥ 0.85** sustained for `entry_confirmation_bars_short` (3 hours, short side) → opens **short**
 - **Asymmetric confirmation gate:** bear regimes in crypto are spikier than bull regimes — they rarely hold long enough to clear a symmetric 8-bar gate, which makes such a gate structurally long-only. The short-side gate is set tighter (3h vs. 6h) so the model engages with bear cycles without dragging long-side quality down.
+- **Friction-aware entry gate:** the model's expected return has to clear `2 × TAKER_FEE_RATE + expected_slippage` before a candidate becomes eligible — so the strategy never opens a trade the model itself doesn't expect to pay for its own frictions.
 - Holds for at least `min_hold_bars` (3 days) so the smoothed posterior can't whipsaw a fresh entry.
+- **Staged soft-exit:** once `min_hold_bars` clears, a posterior in `[exit_proba (0.45), soft_exit_proba (0.60))` reduces by `staged_exit_fraction` (default 50%). Full exit still fires below 0.45.
 - Exits when the held regime's posterior drops below 0.45, the opposite regime takes over, the wide 12% stop fires, or the 60-day time cap is hit. **No fixed take-profit.**
 - After exit, refuses to re-enter the *same* regime for `same_regime_cooldown_bars` (3 days).
+- **Optional vol-scaled sizing:** with `vol_target_per_bar` set, the per-trade notional is scaled by `vol_target / expected_vol` (clipped to `[min_vol_scale, max_vol_scale]`) so risk normalises across regimes. Disabled by default to preserve the BTC-tuned size profile.
 
-The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper).
+The HMM is refit on a rolling 3000-bar window every `refit_every_bars` (weekly by default). Each refit is an *ensemble* of `hmm_n_seeds` (default 5) EM restarts with different random inits; the run with the highest log-likelihood wins. EM is local-optimum sensitive, so this cheaply insulates against landing on a bad mode for a week. A drift monitor fires when a refit shifts the held regime's mean by more than `regime_drift_alert_pct` of the entry-time mean — the failure mode where the model has rotated under an open position. Implementation is pure NumPy (`strategies/hmm.py` for forward-backward / Viterbi / Baum-Welch, `strategies/regime.py` for the 3-state wrapper).
 
 ### Backtest — BTC 2024 (bull year) | 12 trades | Net P&L: +$18.82 | Sharpe 1.14
 
@@ -113,13 +116,31 @@ For 2024–2026 BTC/ETH/SOL, the selective-quantile recommendations are 9/2,
 
 Before flipping `HL_TESTNET=false`:
 
-- [x] State persistence + startup reconciliation
+- [x] State persistence + startup reconciliation (positions **and** orphan
+      open-order detection — `runtime/reconcile.py`)
 - [x] Drawdown halt + halt-with-open-position exit-path test
+- [x] File-based kill switch (`state/halt.flag`) for halting new entries
+      without killing the process
 - [x] Trade journal (append-only fills log at `state/fills_{coin}.jsonl`)
-- [x] Webhook alerting on entries / exits / halts / errors
+      with live-fee capture from the exchange
+- [x] Webhook alerting on entries / exits / halts / errors, with a
+      background-thread dispatcher so a slow webhook can't freeze the
+      event loop
 - [x] Heartbeat ping to an external watchdog
 - [x] HMM health metrics on every refit (separation, log-likelihood, fit ms)
-- [x] Equity-relative position sizing knob
+- [x] HMM ensemble across `hmm_n_seeds` random inits to insulate against
+      EM landing on a bad mode
+- [x] Regime-mean drift monitor — alerts when a refit moves the held
+      regime's mean past the configured drift threshold
+- [x] Equity-relative position sizing knob (`position_size_pct`) **and**
+      equity-relative risk caps (`max_position_pct` / `max_order_pct`)
+- [x] State schema versioning — refuses to silently read a state file
+      written by a newer binary
+- [x] Fee- and slippage-aware `min_expected_return` floor so the entry
+      gate is calibrated to actual frictions
+- [x] Funding-rate accrual in the backtest engine
+- [x] Optional Prometheus-style `/metrics` endpoint (set `METRICS_PORT`)
+      for Grafana dashboards
 - [x] Walk-forward validation across coins and years
 - [x] Per-coin gate calibration tool
 - [ ] 2-week paper / testnet shakeout with alerting and heartbeat wired
@@ -128,6 +149,16 @@ Before flipping `HL_TESTNET=false`:
 
 The two open boxes are operational, not code — flip them yourself once the
 shakeout is clean.
+
+> **Note on the backtest charts above:** the BTC 2024 / 2022 figures
+> were generated against the historic configuration
+> (`min_expected_return_per_bar=1e-4`, `soft_exit_proba=None`,
+> `hmm_n_seeds=1`, no funding accrual). The current defaults are
+> friction-aware, stage exits at `soft_exit_proba=0.60`, ensemble the HMM
+> over five seeds, and (for the backtest engine) accrue funding when a
+> `funding_df` is passed. Rerun
+> `python regime_backtest.py --coin BTC --start 2024-01-01 --end 2025-01-01 --refit-every 336 --chart`
+> to refresh them against the current defaults.
 
 ## Setup
 
@@ -166,6 +197,8 @@ ALERT_WEBHOOK_URL=            # Discord-compatible webhook for entries/exits/hal
 ALERT_MIN_LEVEL=WARNING       # min loguru level for the webhook sink
 HEARTBEAT_URL=                # healthchecks.io / uptime-kuma push URL
 HEARTBEAT_INTERVAL_SECONDS=300
+METRICS_PORT=                 # optional: bind /metrics on this port (Grafana scrape)
+METRICS_HOST=127.0.0.1        # bind host for /metrics (localhost by default)
 ```
 
 > **Never commit `.env`.** It is in `.gitignore`.
@@ -258,6 +291,22 @@ rm state/regime_switching_BTC.json
 rm state/risk_global.json
 ```
 
+Operator kill switch (halts new entries; existing positions still exit
+through their normal triggers):
+
+```bash
+touch state/halt.flag        # halt new entries
+rm    state/halt.flag        # resume
+```
+
+Optional `/metrics` endpoint (Prometheus text format — `regime_p_bull`,
+`equity_usd`, `hmm_separation`, `bars_since_fit`, `in_position`, …):
+
+```bash
+METRICS_PORT=9090 PYTHONPATH=. python main.py --coin BTC
+curl localhost:9090/metrics
+```
+
 ## Project structure
 
 ```
@@ -270,11 +319,14 @@ trading/
 │   └── paper.py              # paper-trading order manager (--paper)
 ├── risk/             # position limits, drawdown halt
 ├── runtime/
-│   ├── state.py              # JSON-sidecar state persistence
+│   ├── state.py              # schema-versioned JSON state persistence
 │   ├── journal.py            # append-only fills journal (JSONL)
-│   ├── notify.py             # webhook alerting (Discord-compatible)
+│   ├── notify.py             # webhook alerting (background-thread dispatcher)
 │   ├── heartbeat.py          # liveness ping to healthchecks.io / uptime-kuma
-│   └── watchdog.py           # equity_watchdog + live equity source
+│   ├── watchdog.py           # equity_watchdog + live equity source
+│   ├── reconcile.py          # open-order reconciliation on startup
+│   ├── halt_flag.py          # file-based operator kill switch
+│   └── metrics.py            # /metrics endpoint + shared MetricsRegistry
 ├── strategies/
 │   ├── base.py               # abstract Strategy + startup reconciliation
 │   ├── regime_switching.py   # HMM-based 3-state regime strategy
@@ -317,29 +369,40 @@ Wire it up in `main.py` alongside the regime strategy.
 
 All entry orders pass through `RiskManager.check_order` before execution:
 
-- Per-order USD cap (`max_order_usd`)
-- Max total position USD (`max_position_usd`)
-- Open-order count cap (`max_open_orders`)
+- Per-order cap. Either an absolute `max_order_usd` floor or an
+  equity-relative `max_order_pct` ceiling — whichever yields the larger
+  cap once equity has been observed.
+- Max total position cap. Same dual mechanism with
+  `max_position_usd` / `max_position_pct`.
+- Open-order count cap (`max_open_orders`).
 - Drawdown halt — set by the equity watchdog when account drawdown ≥
   `max_drawdown_pct`. Halt blocks new entries; existing positions still close.
+- Operator kill switch — `touch state/halt.flag` blocks new entries with
+  the same one-way semantics as the drawdown halt. Exits still fire.
 
 Exits do not go through `check_order`, so a halted strategy can still exit
 cleanly via stop-loss / regime-change / time-cap.
 
-Defaults in `main.py` — adjust to match your account size.
+Defaults in `main.py` (`max_position_pct=0.15`, `max_order_pct=0.10`,
+plus the `$150` / `$100` absolute floors) — adjust to match your account
+size.
 
 ## Testing
 
-The suite covers the HMM math, regime classifier, backtest engine, live strategy
-plumbing (warm-up / poll / refit / enter / exit), risk manager (incl. halt-with-
-position contracts), state persistence, trade journal, alerting, heartbeat,
-fee accounting, indicators, and the offline tools (walk-forward sweep, gate
-calibration, parameter sweep).
+The suite covers the HMM math (incl. multi-seed ensemble), regime
+classifier, backtest engine (incl. staged exit and funding accrual),
+live strategy plumbing (warm-up / poll / refit / enter / exit / staged
+soft-exit / kill switch), risk manager (incl. halt-with-position
+contracts and equity-relative caps), state persistence (incl. schema
+versioning), trade journal, alerting, heartbeat, fee accounting (live
+fee capture + paper), open-order reconciliation, the metrics endpoint,
+the file-based kill switch, indicators, and the offline tools
+(walk-forward sweep, gate calibration, parameter sweep).
 
 ```bash
 source .venv/bin/activate
 python -m pytest -q
-# 241 passed
+# 293 passed
 ```
 
 ## Disclaimer

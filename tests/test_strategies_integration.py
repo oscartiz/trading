@@ -150,7 +150,7 @@ def test_poll_new_bars_drops_still_forming_bar():
     forming_bar = _candle(now_ms, 200.0)
     strat.orders.info.candles.extend([closed_bar, forming_bar])
 
-    new = strat._poll_new_bars()
+    new = _run(strat._poll_new_bars())
     # Only the closed bar should be returned; the forming one is excluded.
     assert len(new) == 1
     assert new[0]["c"] == 150.0

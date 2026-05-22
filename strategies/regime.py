@@ -52,6 +52,7 @@ class RegimeClassifier:
         tol: float = 1e-4,
         min_variance: float = 1e-10,
         random_state: int = 0,
+        n_seeds: int = 1,
     ) -> None:
         self.hmm = GaussianHMM(
             n_states=3,
@@ -59,6 +60,7 @@ class RegimeClassifier:
             tol=tol,
             min_variance=min_variance,
             random_state=random_state,
+            n_seeds=n_seeds,
         )
 
     # ---------- training ----------

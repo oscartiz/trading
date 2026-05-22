@@ -4,12 +4,21 @@ from loguru import logger
 
 from runtime import StateStore
 
+_RISK_STATE_VERSION = 2
+
 
 @dataclass
 class RiskConfig:
+    # Absolute (USD) caps. Used as the active cap when the matching
+    # ``*_pct`` field is None or no live equity has been observed yet.
     max_position_usd: float = 1_000.0
-    max_drawdown_pct: float = 0.05      # 5% from equity high-water mark
     max_order_usd: float = 500.0
+    # Equity-relative caps. When set AND equity has been seen, they take
+    # precedence over the absolute caps so risk envelopes scale with the
+    # account instead of being hard-coded for a specific account size.
+    max_position_pct: float | None = None
+    max_order_pct: float | None = None
+    max_drawdown_pct: float = 0.05      # 5% from equity high-water mark
     max_open_orders: int = 10
 
 
@@ -21,24 +30,44 @@ class RiskManager:
     ) -> None:
         self.cfg = config or RiskConfig()
         self._equity_hwm: float | None = None
+        self._last_equity: float | None = None
         self._open_order_count: int = 0
         self._halted: bool = False
-        self._state = state_store or StateStore("risk", "global")
+        self._state = state_store or StateStore("risk", "global", schema_version=_RISK_STATE_VERSION)
         self._load_state()
 
+    # ------------------------------------------------------------------ #
+    #  Effective caps                                                      #
+    # ------------------------------------------------------------------ #
+    def max_order_cap(self) -> float:
+        if self.cfg.max_order_pct is not None and self._last_equity:
+            return max(0.0, self._last_equity * self.cfg.max_order_pct)
+        return self.cfg.max_order_usd
+
+    def max_position_cap(self) -> float:
+        if self.cfg.max_position_pct is not None and self._last_equity:
+            return max(0.0, self._last_equity * self.cfg.max_position_pct)
+        return self.cfg.max_position_usd
+
+    # ------------------------------------------------------------------ #
+    #  Order gates                                                         #
+    # ------------------------------------------------------------------ #
     def check_order(self, side: str, size_usd: float, current_position_usd: float) -> bool:
         if self._halted:
             logger.warning("Order rejected: trading halted (drawdown breach)")
             return False
 
-        if size_usd > self.cfg.max_order_usd:
-            logger.warning("Order rejected: size ${:.2f} > max ${:.2f}", size_usd, self.cfg.max_order_usd)
+        order_cap = self.max_order_cap()
+        if size_usd > order_cap:
+            logger.warning("Order rejected: size ${:.2f} > max ${:.2f}", size_usd, order_cap)
             return False
 
         projected = abs(current_position_usd + size_usd)
-        if projected > self.cfg.max_position_usd:
+        position_cap = self.max_position_cap()
+        if projected > position_cap:
             logger.warning(
-                "Order rejected: projected position ${:.2f} > max ${:.2f}", projected, self.cfg.max_position_usd
+                "Order rejected: projected position ${:.2f} > max ${:.2f}",
+                projected, position_cap,
             )
             return False
 
@@ -60,6 +89,7 @@ class RiskManager:
         # produce NaN drawdowns that silently never trigger the halt.
         if equity <= 0:
             return not self._halted
+        self._last_equity = float(equity)
         if self._equity_hwm is None or equity > self._equity_hwm:
             self._equity_hwm = equity
 
@@ -98,6 +128,7 @@ class RiskManager:
         self._state.save({
             "halted": self._halted,
             "equity_hwm": self._equity_hwm,
+            "last_equity": self._last_equity,
         })
 
     def _load_state(self) -> None:
@@ -107,6 +138,8 @@ class RiskManager:
         self._halted = bool(s.get("halted", False))
         hwm = s.get("equity_hwm")
         self._equity_hwm = float(hwm) if hwm is not None else None
+        last = s.get("last_equity")
+        self._last_equity = float(last) if last is not None else None
         if self._halted:
             logger.error(
                 "Risk halt restored from disk | hwm={} — entries blocked until reset_halt()",

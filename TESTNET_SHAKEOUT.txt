@@ -1,0 +1,147 @@
+Pre-shakeout checklist — 2 weeks on Hyperliquid testnet
+========================================================
+Goal: prove the operational scaffolding works for 14 days straight before
+risking real capital. Strategy trades ~1×/month, so this is mostly a test of
+the alerting, heartbeat, persistence, and process supervision — not P&L.
+
+
+1. TESTNET ACCOUNT
+   [ ] Generate a fresh wallet for testnet (DO NOT reuse your mainnet wallet).
+   [ ] Go to https://app.hyperliquid-testnet.xyz, connect, claim testnet USDC
+       from the faucet.
+   [ ] Confirm the balance shows up in the testnet UI.
+
+
+2. EXTERNAL SERVICES
+   [ ] Create a Discord channel + webhook URL (or any service that accepts
+       JSON {"content": "..."}). Keep the URL secret.
+   [ ] Create a heartbeat check on healthchecks.io or uptime-kuma.
+       Configure it to page you (email/push/SMS) if pings stop for 10+ min.
+
+
+3. CONFIGURE .env ON THE DEPLOY HOST
+   HL_PRIVATE_KEY=0x...           # testnet wallet
+   HL_ACCOUNT_ADDRESS=0x...       # testnet wallet
+   HL_TESTNET=true
+   LOG_LEVEL=INFO
+
+   ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/...
+   ALERT_MIN_LEVEL=WARNING
+   HEARTBEAT_URL=https://hc-ping.com/<uuid>
+   HEARTBEAT_INTERVAL_SECONDS=300
+
+
+4. SMOKE-TEST EXTERNAL INTEGRATIONS (5 min, before anything else)
+   [ ] curl -X POST -H "Content-Type: application/json" \
+           -d '{"content":"alert test"}' "$ALERT_WEBHOOK_URL"
+       Expected: a message appears in your Discord channel.
+
+   [ ] curl "$HEARTBEAT_URL"
+       Expected: the check turns green on the dashboard.
+
+   If either fails, fix it now. There is no point shaking out a bot that
+   cannot tell you when it dies.
+
+
+5. PICK A DEPLOY HOST
+   [ ] A VPS or home box that you never reboot. Mac sleeping = bot dead.
+   [ ] Python 3.11+ available.
+   [ ] Outbound network reachable to:
+         - api.hyperliquid-testnet.xyz
+         - fapi.binance.com
+         - your webhook URL
+         - your heartbeat URL
+
+
+6. DEPLOY
+   [ ] git clone https://github.com/oscartiz/trading
+   [ ] cd trading && python -m venv .venv && source .venv/bin/activate
+   [ ] pip install hyperliquid-python-sdk pandas numpy python-dotenv \
+                   loguru websockets aiohttp eth-account
+   [ ] Copy your .env to the host (scp or paste — do NOT commit it).
+   [ ] python -m pytest -q
+       Expected: 293 passed. If the count differs, investigate before
+       continuing.
+
+
+7. 1-HOUR PRE-FLIGHT ON THE DEPLOY HOST
+   [ ] HL_TESTNET=true PYTHONPATH=. python main.py --coin BTC
+   [ ] In another shell:
+         tail -f logs/trading.log | \
+             grep -E "started|HMM refit|entering|exiting|heartbeat|ERROR|Traceback"
+
+   Confirm in the first hour:
+   [ ] "RegimeSwitchingStrategy | BTC started | window=3000 ..." line
+   [ ] Bars start ticking in (one per hour at 1h interval)
+   [ ] "equity_watchdog started"
+   [ ] "heartbeat started"
+   [ ] At least one heartbeat ping lands on the dashboard
+   [ ] No tracebacks anywhere
+
+
+8. VERIFY THE STATE DIRECTORY
+   [ ] state/regime_switching_BTC.json exists after the first tick.
+   [ ] state/risk_global.json exists once the watchdog has read equity.
+   [ ] Optional but recommended: daily rsync of state/ to a second box,
+       so if the host dies you can restore mid-trade instead of cold-starting
+       a half-completed position.
+
+
+9. LOCK THE PROCESS DOWN — pick ONE supervision method
+   [ ] tmux (simplest, doesn't survive reboot):
+         tmux new -s trading
+         # then Ctrl-B D to detach
+
+   [ ] systemd (recommended for the shakeout, auto-restarts):
+         # write a unit with Restart=on-failure and RestartSec=30
+
+   [ ] nohup & (only acceptable if you have other supervision):
+         nohup python main.py --coin BTC &
+
+
+10. DEFINE PASS / ABORT CRITERIA — WRITE THEM DOWN NOW
+    PASS (must hold for full 2 weeks):
+    [ ] Heartbeat never gaps > 10 min (or webhook fires if it does).
+    [ ] Zero unhandled exceptions in logs/trading.log.
+    [ ] Every trade has matching entry+exit records in state/fills_BTC.jsonl.
+    [ ] No reconciliation mismatch warnings.
+    [ ] Process survives at least one HMM refit (~7 days in).
+
+    ABORT (any one of these = stop and investigate):
+    [ ] Process crashes more than once without recovering.
+    [ ] A trade fills but the strategy thinks it is still flat.
+    [ ] Drawdown halt fires (on testnet this is fine — verify it worked,
+        then reset before continuing).
+
+
+11. DAY-1 MONITORING ROUTINE
+    First 24h, be paranoid:
+    [ ] Check the log every few hours:
+          grep -E "entering|exiting|HMM refit|ERROR" logs/trading.log
+    [ ] Confirm state/regime_switching_BTC.json matches the testnet UI position.
+    [ ] After 24h with no incidents, drop to once-a-day + webhook for anything
+        urgent.
+
+
+12. THINGS NOT TO DO DURING THE SHAKEOUT
+    [ ] DO NOT change any code. The point is to test the build that will
+        run on mainnet.
+    [ ] DO NOT git pull mid-shakeout. If you change code, the 14-day
+        clock resets.
+    [ ] DO NOT reset the drawdown halt without investigating WHY it fired.
+
+
+WHEN TO FLIP TO MAINNET
+=======================
+After 14 clean days on testnet, ALL of the following are true:
+  - Pass criteria from §10 all held.
+  - You have a written record of every trade with intended vs fill price.
+  - You can describe what happened on every day in plain English from the logs.
+
+Then:
+  1. Generate / use your mainnet wallet credentials.
+  2. Flip HL_TESTNET=false in .env.
+  3. Re-confirm the webhook + heartbeat URLs are still reachable.
+  4. Start with the same conservative defaults already in main.py
+     (BTC, $100 notional, $150 max position, 5% drawdown halt).
+  5. Re-do step 11 (day-1 paranoid monitoring) for the first 24h of mainnet.

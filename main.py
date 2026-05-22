@@ -15,13 +15,13 @@ from runtime import (
     heartbeat_loop,
     make_live_equity_source,
     make_notifier_from_env,
+    serve_metrics,
 )
 from strategies.configs import RegimeSwitchingConfig
 from strategies.regime_switching import RegimeSwitchingStrategy
 
 
 def setup_logging(notifier: Notifier) -> None:
-    import os
     os.makedirs("logs", exist_ok=True)
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level, colorize=True)
@@ -32,12 +32,12 @@ def setup_logging(notifier: Notifier) -> None:
 
 def build_strategy(
     coin: str, order_manager, risk: RiskManager, notifier: Notifier,
-    equity_source,
+    equity_source, account_address: str | None,
 ) -> RegimeSwitchingStrategy:
     return RegimeSwitchingStrategy(
         coin=coin, order_manager=order_manager, risk=risk,
         config=RegimeSwitchingConfig(), notifier=notifier,
-        equity_source=equity_source,
+        equity_source=equity_source, account_address=account_address,
     )
 
 
@@ -59,30 +59,46 @@ async def main() -> None:
     )
 
     info, exchange = build_clients(read_only=args.paper)
+    # Equity-relative caps default to 15% of equity for max position and 10%
+    # for any single order — wide enough that the BTC defaults (size=$100,
+    # max_position=$150) keep working at small equities, and they scale up
+    # cleanly as the account grows. Absolute caps stay as the floor.
     risk = RiskManager(RiskConfig(
         max_position_usd=150.0,
         max_order_usd=100.0,
+        max_position_pct=0.15,
+        max_order_pct=0.10,
         max_drawdown_pct=0.05,
     ))
 
     if args.paper:
         order_manager = PaperOrderManager(info, starting_equity=args.paper_equity)
         get_equity = order_manager.get_equity
+        account_address = None
     else:
         assert exchange is not None
         order_manager = OrderManager(info, exchange)
         get_equity = make_live_equity_source(info, settings.account_address)
+        account_address = settings.account_address
 
-    strategy = build_strategy(args.coin, order_manager, risk, notifier, get_equity)
+    strategy = build_strategy(
+        args.coin, order_manager, risk, notifier, get_equity, account_address,
+    )
 
     heartbeat_url = os.getenv("HEARTBEAT_URL") or None
     heartbeat_interval = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "300"))
+    metrics_port = int(os.getenv("METRICS_PORT", "0") or 0) or None
+    metrics_host = os.getenv("METRICS_HOST", "127.0.0.1")
 
-    await asyncio.gather(
-        strategy.run(),
-        equity_watchdog(get_equity, risk, poll_seconds=60.0),
-        heartbeat_loop(heartbeat_url, interval_seconds=heartbeat_interval),
-    )
+    try:
+        await asyncio.gather(
+            strategy.run(),
+            equity_watchdog(get_equity, risk, poll_seconds=60.0),
+            heartbeat_loop(heartbeat_url, interval_seconds=heartbeat_interval),
+            serve_metrics(metrics_port, host=metrics_host),
+        )
+    finally:
+        notifier.close()
 
 
 if __name__ == "__main__":
